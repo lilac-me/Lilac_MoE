@@ -271,8 +271,8 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
         tokens_per_expert = self.local_map.sum(dim=0).long().cpu() # [num_local_experts]
 
         (permuted_local_hidden_states, _, self.reversed_local_input_permutaiton_mapping) = permute(
-            hidden_states,
-            self.local_map,
+            hidden_states, # [S*B*EP, H]
+            self.local_map, # [S*B*EP, num_local_experts]
             num_out_tokens=tokens_per_expert.sum().item(),
             fused=self.config.moe_permute_fusion,
         )
@@ -304,6 +304,7 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
             fused=self.config.moe_permute_fusion,
         )
         # unpermuted_local_hidden_states: [S*B*EP, H]
+        return unpermuted_local_hidden_states
     
     def token_combine(self, hidden_states: Tensor) -> Tensor:
         """
