@@ -1,6 +1,7 @@
-from typing import Optional
+from typing import Optional, List
 from abc import abstractmethod
 
+import torch
 from torch import Tensor
 """
     We use the following notation throughout the codebase:
@@ -107,4 +108,227 @@ class MoETokenDispatcher:
     
     @abstractmethod
     def combine_preprocess(self, hidden_states: Tensor) -> Tensor:
+        """
+        Preprocess experts outputs for the combine step.
+
+        This method performs local computations on expert outputs before the communication
+        step for combining the outputs back to the original token order.
+
+        Note:
+            Try to avoid any communication here to enable optimal computation-communication
+            overlapping when enabling communication overlap, since communications in the
+            same stream runs sequentially and may get exposed.
         
+        Args:
+            hidden_states (torch.Tensor): The output hidden states from the experts.
+
+        Returns:
+            A tensor of preprocessed hidden states ready for the combine communication step.
+        """
+        raise NotImplementedError("combine_preprocess function not implemented")
+    
+    @abstractmethod
+    def token_combine(self, hidden_states: Tensor) -> Tensor:
+        """
+        Combine expert outputs across devices using communication.
+
+        This method performs the main communication (e.g., All-to-All, Reduce-Scatter) to gather
+        the processed tokens from the experts and combine them back to the original order.
+
+        Args:
+            hidden_states (Tensor): Preprocessed hidden states from experts ready for combination.
+        
+        Returns:
+            A tensor of combined hidden states in the original token order.
+        """
+        raise NotImplementedError("token_combine function not implemented")
+    
+    @abstractmethod
+    def combine_postprocess(self, hidden_states: Tensor) -> Tensor:
+        """
+        Postprocess combined hidden states after the combine communication step.
+
+        This method performs post-communication tasks like unpermuting and reshaping 
+        to restore the original tensor structure.
+
+        Note:
+            Try to avoid any communication here to enable optimal computation-communication
+            overlapping when enabling communication overlap, since communications in the
+            same stream runs sequentially and may get exposed.
+
+        Args:
+            hidden_states (torch.Tensor): Combined hidden states after communication.
+        
+        Returns:
+            The final output tensor.
+        """
+        raise NotImplementedError("combine_postprocess function not implemented")
+    
+    def set_shared_expert(self, shared_expert: SharedExpertMLP) -> None:
+        """
+        Set the shared expert MLP for this token dispatcher.
+        """
+        assert self.config.moe_shared_expert_overlap
+        self.shared_expert = shared_expert
+    
+
+class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
+    """
+    AllGather based token Dispatcher.
+    Note that this allgather spans the communication domain to TP*EP.
+    """
+
+    def __init__(
+        self,
+        num_local_experts: int,
+        local_expert_indices: List[int],
+        config: TransformerConfig,
+        pg_collection: Optional[ProcessGroupCollection] = None,   
+    ) -> None:
+        """
+        Initialize the MoEAllgatherTokenDispatcher based on the token dispatcher.
+
+        Args:
+            num_lcoal_expert (int): The number of local experts.
+            local_expert_indices (List[int]): The list of local expert indices.
+            config (TransformerConfig): Configuration for the MoE layer.
+            pg_collection (ProcessGroupCollection, optional): Process groups for MoE operations.
+        """
+        super().__init__(config, pg_collection)
+        self.num_local_experts = num_local_experts
+        assert self.num_local_experts > 0, "num_local_experts should be greater than 0"
+        self.local_expert_indices = local_expert_indices
+        assert len(self.local_expert_indices) > 0, "local_expert_indices should not be empty"
+        self.router_topk = config.moe_router_topk
+        self.bias = config.add_bias_linear
+
+        # self.global_local_map: 2D tensor. A mask of mapping between global and local expert tokens
+        # where each element is True if it's between the local_expert_indices. Only useful
+        # when cross device token permutation is enabled and *AllGather* is performed.
+
+    def dispatch_preprocess(
+        self, hidden_states: Tensor, routing_map: Tensor, probs: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        """
+        Reshape hidden states and caches the routing map.
+
+        Args:
+            hidden_states (Tensor): 3D [S/TP, B, H].
+            routing_map (Tensor): 2D [S/TP*B, num_experts].
+            probs (Tensor): 2D [S/TP*B, num_experts].
+        """
+        self.hidden_shape = hidden_states.shape # [S/TP, B, H]
+        # [S/TP, B, H] -> [S/TP*B, H]
+        hidden_states = hidden_states.reshape(-1, self.hidden_shape[-1])
+        self.routing_map = routing_map
+        return hidden_states, probs
+    
+    def token_dispatch(self, hidden_states: Tensor, probs: Tensor) -> tuple[Tensor, Tensor]:
+        """
+        Gather tokens from all TP*EP ranks using AllGather.
+
+        Args:
+            hidden_states (Tensor): 2D [S/TP*B, H].
+            probs (Tensor): 2D [S/TP*B, num_experts].
+        """
+        # Permute the tokens across the expert parallel devices.
+        if self.tp_size > 1 or self.ep_size > 1:
+            ## local_expert_indices calculation.
+            with torch.no_grad():
+                # [num_local_tokens, num_experts] -> [num_global_tokens, num_experts] where
+                # num_local_tokens = S/TP*B, num_global_tokens = S*B*EP
+                self.routing_map = gather_from_sequence_parallel_region(
+                    self.routing_map, self.tp_ep_group
+                )
+            ## local_probs calculation.
+            # max_probs: [S/TP*B, num_experts] -> global_probs: [S*B*EP, num_experts]
+            probs = gather_from_sequence_parallel_region(probs, self.tp_ep_group)
+            # [S/TP*B, H] -> [(S/TP)*B*(TP*EP), H] -> [S*B*EP, H]
+            hidden_states = gather_from_sequence_parallel_region(hidden_states, self.tp_ep_group, use_global_buffer=True)
+        
+        return hidden_states, probs
+    
+    def dispatch_postprocess(self, hidden_states: Tensor, probs: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """
+        After gatherting these  tokens, this method identifies the tokens for local experts and
+        permutes the tokens to group them by expert for efficient expert processing.
+
+        Args:
+            hidden_states (Tensor): 2D [S*B*EP, H].
+            probs (Tensor): 2D [S*B*EP, num_experts].
+        """
+        self.hidden_shape_before_permute = hidden_states.shape
+
+        # The routing map and probs that for local experts. [S*B*EP, num_local_experts]
+        self.local_map = self.routing_map[
+            :, self.local_expert_indices[0] : self.local_expert_indices[-1] + 1
+        ].contiguous()
+        # Probs of global token assignment to local experts. [S*B*EP, num_local_experts]
+        self.local_probs = probs[
+            :, self.local_expert_indices[0] : self.local_expert_indices[-1] + 1
+        ].contiguous()
+
+        tokens_per_expert = self.local_map.sum(dim=0).long().cpu() # [num_local_experts]
+
+        (permuted_local_hidden_states, _, self.reversed_local_input_permutaiton_mapping) = permute(
+            hidden_states,
+            self.local_map,
+            num_out_tokens=tokens_per_expert.sum().item(),
+            fused=self.config.moe_permute_fusion,
+        )
+        # permuted_local_hidden_states: [num_local_tokens, H]
+        # self.reversed_local_input_permutaiton_mapping: [num_local_tokens]
+
+        self.local_probs = self.local_probs.T.contiguous().masked_select(
+            self.local_map.T.contiguous()
+        )
+        # self.local_probs.T: [num_local_tokens, S*B*EP]
+        # self.local_map.T: [num_local_tokens, S*B*EP]
+        self.routing_map = None
+        return permuted_local_hidden_states, tokens_per_expert, self.local_probs
+    
+    def combine_postprocess(self, hidden_states: Tensor) -> Tensor:
+        """
+        Reverses token permutation to restore original ordering before reduction operations.
+
+        This method unpermutes the expert outputs using the cached permutation mapping
+        from the dispatch phase. The unpermutation operation restores tokens to their
+        original sequence positions, preparing them for the subsequent reduction scatter
+        operation that will aggregate results across ranks.
+        """
+        unpermuted_local_hidden_states = unpermute(
+            hidden_states,
+            self.reversed_local_input_permutaiton_mapping,
+            restore_shape=self.hidden_shape_before_permute,
+            routing_map=self.local_map,
+            fused=self.config.moe_permute_fusion,
+        )
+        # unpermuted_local_hidden_states: [S*B*EP, H]
+    
+    def token_combine(self, hidden_states: Tensor) -> Tensor:
+        """
+        Reduce-Scatter the unpermuted tokens back to the original sequence parallel region.
+
+        This method performs the ReduceScatter communication operation to collect expert
+        outputs from their processing ranks and redistribute tokens back to the ranks that
+        originally held them. This completes the expert processing
+        communication pattern and prepares tokens for final unpermutation.
+
+        Args:
+            hidden_states (Tensor): 2D [S*B*EP, H].
+        """
+        if self.tp_size > 1 or self.ep_size > 1:
+            # [S*B*EP, H] -> [S/TP*B, H]
+            hidden_states = reduce_scatter_to_sequence_parallel_region(
+                hidden_states.to(self.local_probs.dtype), self.tp_ep_group
+            ).to(hidden_states.dtype)
+        return hidden_states
+    
+    def combine_preprocess(self, hidden_states: Tensor) -> Tensor:
+        """
+        Restoring the original tensor shape..
+
+        Args:
+            hidden_states (Tensor): 2D [num_local_tokens, H].
+        """
+        return hidden_states.view(self.hidden_shape) # [S/TP*B, H] -> [S/TP, B, H]
