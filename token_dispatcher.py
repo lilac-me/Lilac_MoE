@@ -30,7 +30,7 @@ class MoETokenDispatcher:
             pg_collection (ProcessGroupCollection, optional): Process groups for MoE operations.
         """
         self.config = config
-        self.shared_expert = Optional[SharedExpertMLP] = None
+        self.shared_experts = Optional[SharedExpertMLP] = None
 
         self.ep_group = pg_collection.ep
         # use pg_collection.expt_tp_group as tensor model parallel group in this module.
@@ -164,12 +164,12 @@ class MoETokenDispatcher:
         """
         raise NotImplementedError("combine_postprocess function not implemented")
     
-    def set_shared_expert(self, shared_expert: SharedExpertMLP) -> None:
+    def set_shared_expert(self, shared_experts: SharedExpertMLP) -> None:
         """
         Set the shared expert MLP for this token dispatcher.
         """
         assert self.config.moe_shared_expert_overlap
-        self.shared_expert = shared_expert
+        self.shared_experts = shared_experts
     
 
 class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
@@ -333,3 +333,142 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
             hidden_states (Tensor): 2D [num_local_tokens, H].
         """
         return hidden_states.view(self.hidden_shape) # [S/TP*B, H] -> [S/TP, B, H]
+
+
+class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
+    """
+    AllToAll based token Dispatcher.
+    
+    The workflow of AlltoAll token dispatcher is as following:
+    (1) preprocess: calculate necessary metadata for communication and permute.
+    (2) dispatch preprocess: permute tokens.
+    (3) token dispatch: A2A(EP).
+    (4) dispatch postprocess: AG(TP) -> sort_chunk(if num_local_experts > 1).
+    (5) combine preproess: sort_chunk(if num_local_experts > 1) -> RS(TP).
+    (6) token combine: A2A(EP).
+    (7) combine postprocess: unpermute tokens
+    """
+
+    # d2h copies are performed on this stream for overlapping with the main stream.
+    d2h_stream = None
+
+    def __init__(
+        self,
+        num_local_experts: int,
+        local_expert_indices: List[int],
+        config: TransformerConfig,
+        pg_collection: Optional[ProcessGroupCollection] = None,   
+    ) -> None:
+        """
+        Initialize the MoEAlltoAllTokenDispatcher based on the token dispatcher.
+
+        Args:
+            num_lcoal_expert (int): The number of local experts.
+            local_expert_indices (List[int]): The list of local expert indices.
+            config (TransformerConfig): Configuration for the MoE layer.
+            pg_collection (ProcessGroupCollection, optional): Process groups for MoE operations.
+        """
+        super().__init__(config, pg_collection)
+        self.num_local_experts = num_local_experts
+        assert config.num_moe_experts is not None
+        self.num_experts = config.num_moe_experts
+        assert self.num_local_experts > 0, "Expected at least one expert."
+        self.local_expert_indices = local_expert_indices
+        assert (
+            len(self.local_expert_indices) == self.num_local_experts
+        ), "Invalid local expert indices."
+        for i in range(len(self.local_expert_indices) - 1):
+            assert (
+                self.local_expert_indices[i] == self.local_expert_indices[i + 1] - 1
+            ), "local_expert_indices must be contiguous."
+        
+        # [ep_size]. Represents the number of tokens sent by the current rank to other EP ranks.
+        self.input_splits = None
+        # [ep_size]. Represents the number of tokens received by the current rank from other EP ranks.
+        self.output_splits = None
+        # [tp_size]. Represents the number of tokens received by the current rank from other TP ranks.
+        self.output_splits_tp = None
+        self.permute_idx_device = torch.device("cuda") if config.moe_permute_fusion else "cpu"
+        # [num_experts * tp_size] = [num_local_experts * ep_size * tp_size].
+        input_chunk_idxs = torch.arange(
+            self.num_experts * self.tp_size, device=self.permute_idx_device
+        )
+        # [num_local_experts, tp_size * ep_size]. Sort the input chunks by local experts.
+        self.sort_input_by_local_experts = input_chunk_idxs.reshape(
+            -1, self.num_local_experts
+        ).T.ravel()
+        # [tp_size * ep_size, num_local_experts]. Restore the output chunks by local experts.
+        self.restore_output_by_local_experts = input_chunk_idxs.reshape(
+            self.num_local_experts, -1
+        ).T.ravel()
+
+        # Token drop and padding
+        # Drop and pad the input to capacity.
+        self.drop_and_pad = config.moe_pad_expert_input_to_capacity
+        if self.drop_and_pad:
+            assert config.moe_expert_capacity_factor is not None
+            self.moe_expert_capacity_factor = config.moe_expert_capacity_factor
+        self.capacity = None
+
+        # A cuda stream synchronized is needed in during token permutation in some cases,
+        # because there are several non-blocking d2h data transfers called at 'self.cuda_d2h_point'.
+        # The synchronization happens at 'self.cuda_sync_point', which is decided based on the
+        # MoE and parallel settings. Valid points are 'before_permutation_1', 'before_ep_alltoall',
+        # 'before_permutation_2', 'before_finish' and 'no_sync'.
+        self.cuda_sync_point = "no_sync"
+        self.cuda_sync_point_priority = {
+            "before_permutation_1": 0,
+            "before_ep_alltoall": 1,
+            "before_permutation_2": 2,
+            "before_finish": 3,
+            "no_sync": 4,
+        }
+        self.cuda_d2h_point = "before_permutation_1"
+        if MoEAlltoAllTokenDispatcher.d2h_stream is None:
+            MoEAlltoAllTokenDispatcher.d2h_stream = torch.cuda.Stream()
+
+        self.shared_experts = None
+
+    def preprocess(self, routing_map: Tensor) -> Tensor:
+        """
+        Preprocess the token routing map for All-to-All communication and token permutation.
+        
+        This method computes the number of tokens assigned to each expert based on the routing_map.
+        It also initilizes necessary data structures for All-to-All communication, such as input
+        and output splits, and the mapping between global tokens and local experts. This method should
+        not call any d2h data coping due to performance consideration. The necessary d2h copies are
+        made on the 'self.cuda_d2h_stream' at 'self.cuda_d2h_point'.
+
+        Args:
+            routing_map (Tensor): 2D [S/TP*B, num_experts]. The token to expert mapping tensor.
+        
+        Returns:
+            A tensor with the number of tokens for each local expert.
+        """
+        if self.drop_and_pad:
+            # Drop and pad the input to capacity.
+            num_tokens = routing_map.size(0) * config.moe_router_topk
+            self.capacity = get_capacity(
+                num_tokens=num_tokens,
+                num_experts=self.num_experts,
+                capacity_factor=self.moe_expert_capacity_factor,
+            )
+            self.num_out_tokens = self.capacity * self.num_experts
+            # [num_local_experts] number of tokens processed by each expert.
+            num_tokens_per_local_expert = torch.full(
+                (self.num_local_experts,),
+                self.capacity * self.tp_size * self.ep_size,
+                dtype=torch.long,
+            )
+            # [tp_size * ep_size, num_local_experts]. Represents the number of tokens
+            # sent to each local expert by all ranks.
+            self.num_global_tokens_per_local_expert = torch.full(
+                (self.num_experts * self.tp_size,),
+                self.capacity,
+                dtype=torch.long,
+                device=self.permute_idx_device,
+            )
+            return num_tokens_per_local_expert
+        
+        # [num_experts], number of tokens assigned to each expert from the current rank's input.
+        
