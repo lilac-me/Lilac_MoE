@@ -270,14 +270,14 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
 
         tokens_per_expert = self.local_map.sum(dim=0).long().cpu() # [num_local_experts]
 
-        (permuted_local_hidden_states, _, self.reversed_local_input_permutaiton_mapping) = permute(
+        (permuted_local_hidden_states, _, self.reversed_local_input_permutation_mapping) = permute(
             hidden_states, # [S*B*EP, H]
             self.local_map, # [S*B*EP, num_local_experts]
             num_out_tokens=tokens_per_expert.sum().item(),
             fused=self.config.moe_permute_fusion,
         )
         # permuted_local_hidden_states: [num_local_tokens, H]
-        # self.reversed_local_input_permutaiton_mapping: [num_local_tokens]
+        # self.reversed_local_input_permutation_mapping: [num_local_tokens]
 
         self.local_probs = self.local_probs.T.contiguous().masked_select(
             self.local_map.T.contiguous()
@@ -298,7 +298,7 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
         """
         unpermuted_local_hidden_states = unpermute(
             hidden_states,
-            self.reversed_local_input_permutaiton_mapping,
+            self.reversed_local_input_permutation_mapping,
             restore_shape=self.hidden_shape_before_permute,
             routing_map=self.local_map,
             fused=self.config.moe_permute_fusion,
@@ -471,4 +471,232 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             return num_tokens_per_local_expert
         
         # [num_experts], number of tokens assigned to each expert from the current rank's input.
+        num_local_tokens_per_expert = routing_map.sum(dim=0).long()
+
+        if (
+            config.moe_expert_capacity_factor is not None
+            or config.moe_router_padding_for_quantization
+        ):
+            # When using token dropping or router padding, output size is dynamic.
+            # Need to sync output size device->host before allocating output buffer.
+            self.num_out_tokens = num_local_tokens_per_expert.sum()
+            self._maybe_update_cuda_sync_point("before_permutation_1")
+        else:
+            # For dropless training, output size is static (num_tokens * topk)
+            # No explicit synchronization is needed.
+            self.num_out_tokens = routing_map.size(0) * config.
+        if self.ep_size > 1 or self.tp_size > 1:
+            # Calculate 'input_splits', 'output_splits' for alltoall/allgather in variable size.
+            # [ep_size]. Represents the number of tokens sent by the current rank to other EP ranks.
+            # [num_experts] -> [ep_size, num_local_experts] -> [ep_size]
+            self.input_splits = num_local_tokens_per_expert.reshape(
+                self.ep_size, self.num_local_experts
+            ).sum(axis=1)
+            # Gather the global distribution of tokens across ranks.
+            # num_global_tokens_per_expert represents the number of tokens sent to each expert by all ranks.
+            # [tp_size, ep_size, num_experts]
+            num_global_tokens_per_expert = (
+                gather_from_sequence_parallel_region(
+                    num_local_tokens_per_expert, group=self.tp_ep_group,
+                )
+                .reshape(self.ep_size, self.tp_size, self.num_experts)
+                .transpose(0, 1)
+            )
+            # [tp_size, ep_size, num_experts] -> [tp_size, ep_size, num_local_experts]
+            num_global_tokens_per_local_expert = num_global_tokens_per_expert[
+                :, :, self.local_expert_indices[0] : self.local_expert_indices[-1] + 1
+            ].contiguous()
+            # [tp_size, ep_size, num_local_experts] -> [tp_size, ep_size]
+            num_global_tokens_per_rank = num_global_tokens_per_local_expert.sum(axis=2)
+            
+            # [tp_size, ep_size] -> [ep_size]
+            # self.output_splits represents the number of tokens received by the current rank from other EP ranks.
+            self.output_splits = num_global_tokens_per_rank[self.tp_rank]
+            # [tp_size, ep_size] -> [tp_size]
+            # self.output_splits_tp represents the number of tokens received by the current rank from other TP ranks.
+            self.output_splits_tp = num_global_tokens_per_rank.sum(axis=1)
+            # [tp_size, ep_size, num_local_experts] -> [num_local_experts]
+            num_local_tokens_per_expert = num_global_tokens_per_local_expert.sum(dim=(0, 1))
+
+            # A synchronization is needed before expert parallel AlltoAll communication
+            # to get the 'inputs_splits' and 'output_splits'  CPU values.
+            self._maybe_update_cuda_sync_point("before_ep_alltoall")
+        else:
+            num_global_tokens_per_local_expert = num_local_tokens_per_expert.reshape(
+                self.num_experts
+            )
+            num_tokens_per_local_expert = num_local_tokens_per_expert
+            # A synchronization is needed before the returns to get the 'num_tokens_per_local_expert' CPU values.
+            self._maybe_update_cuda_sync_point("before_finish")
         
+        if self.num_local_experts > 1:
+            # [tp_size * ep_size, num_local_experts]. Represents the number of tokens sent
+            # to each local expert by all ranks.
+            self.num_global_tokens_per_local_expert = num_global_tokens_per_local_expert.view(
+                -1, self.num_local_experts
+            )
+            if not config.moe_permute_fusion:
+                # A synchronization is needed before permutation 2 to get the 'num_global_tokens_per_local_expert' CPU values.
+                self._maybe_update_cuda_sync_point("before_permutation_2")
+        
+        assert (
+            self.cuda_sync_point_priority[self.cuda_d2h_point]
+            <= self.cuda_sync_point_priority[self.cuda_sync_point]
+        ), "cuda_sync_point must be after cuda_d2h_point."
+        return num_local_tokens_per_expert
+    
+    def dispatch_preprocess(
+        self, hidden_states: Tensor, routing_map: Tensor, probs: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        """
+        Prepare hidden states and probilities for dispatch.
+
+        This method reshapes the hidden states, computes mcommunication metadata,
+        and permutes the tokens and probilities before All-to-All communication.
+
+        Args:
+            hidden_states (Tensor): 3D [S/TP, B, H].
+            routing_map (Tensor): 2D [S/TP*B, num_experts].
+            probs (Tensor): 2D [S/TP*B, num_experts].
+        
+        Returns:
+            A tuple of permuted hidden states and permuted probabilities ready for dispatch communication.
+        """
+        # Preprocess: Get the metadata for communication and, permutaiton and computation operations.
+        self.hidden_shape = hidden_states.shape # [S/TP, B, H]
+        self.routing_map = routing_map
+        self.probs = probs
+        assert probs.dim() == 2, "probs should be 2D [S/TP*B, num_experts]"
+        assert routing_map.dim() == 2, "routing_map should be 2D [S/TP*B, num_experts]"
+        assert routing_map.dtype == torch.bool, "routing_map should be a boolean tensor"
+        hidden_states = hidden_states.view(-1, self.hidden_shape[-1]) # [S/TP*B, H]
+
+        if config.moe_router_padding_for quantization:
+            pad_multiple = get_align_size_for_quantization(self.config)
+            if is_experimental_enabled() and self.config.moe_permute_fusion:
+                self.routing_map = fused_pad_routing_map(self.routing_map, pad_multiple)
+            else:
+                self.routing_map = pad_routing_map(self.routing_map, pad_multiple)
+        self.tokens_per_expert = self.preprocess(self.routing_map)
+
+        if self.shared_experts is not None:
+            self.shared_experts.pre_foward_comm(hidden_states.view(self.hidden_shape))
+
+        # Permutation 1: input to AlltoAll input
+        self.tokens_per_expert = self._maybe_d2h_and synchronize(
+            "before_permutation_1", self.tokens_per_expert
+        )
+        self.hidden_shape_before_permute = hidden_states.shape
+        (
+            permuted_local_input_tokens,
+            permuted_probs,
+            self.reversed_local_input_permutation_mapping,
+            _,
+            _,
+        ) = permute(
+            hidden_states,
+            self.routing_map,
+            probs=probs,
+            num_out_tokens=self.num_out_tokens,
+            fused=self.config.moe_permute_fusion,
+            drop_and_pad=self.drop_and_pad,
+        )
+        return permuted_local_input_tokens, permuted_probs
+
+    def token_dispatch(self, permuted_local_input_tokens: Tensor, permuted_probs: Tensor) -> tuple[Tensor, Tensor]:
+        """
+        Perform All-to-All communication to dispatch tokens to expert devices.
+
+        This method performs all-to-all communication step to dispatch tokens across expert parallel
+        ranks. It synchronizes the metadata at the appropriate point before performing the communication.
+
+        Args:
+            permuted_local_input_tokens (Tensor): 2D [num_local_tokens, H]. The permuted hidden states ready for dispatch.
+            permuted_probs (Tensor): 2D [num_local_tokens, num_local_experts]. The permuted probabilities ready for dispatch.
+        
+        Returns:
+            A tuple of hidden states and probabilities after dispatch communication.
+        """
+        # Perform expert parallel AlltoAll communication.
+        self.tokens_per_expert = self._maybe_d2h_and_synchronize(
+            "before_ep_alltoall", self.tokens_per_expert
+        )
+        global_input_tokens = all_to_all(
+            permuted_local_input_tokens, self.input_splits, self.output_splits, group=self.ep_group
+        )
+        global_probs = all_to_all(
+            permuted_probs, self.input_splits, self.output_splits, group=self.ep_group
+        )
+        return global_input_tokens, global_probs
+
+    def dispatch_postprocess(self, global_input_tokens: Tensor, global_probs: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """
+        Postprocess the dispatched tokens after All-to-All communication.
+
+        This method involves an All-Gather in the tensor parallel dimension and sorting tokens
+        by expert if there are multiple local experts.
+
+        Args:
+            global_input_tokens (Tensor): 2D [S*B*EP, H]. The hidden states after dispatch communication.
+            global_probs (Tensor): 2D [S*B*EP, num_local_experts]. The probabilities after dispatch communication.
+        
+        Returns:
+            A tuple of hidden states, number of tokens per expert, and probabilities after postprocessing.
+        """
+        if self.shared_experts is not None:
+            self.shared_experts.linear_fc1_forward_and_act(global_input_tokens)
+
+        if self.tp_size >1:
+            if self.output_splits_tp is None:
+                output_split_sizes = None
+            else:
+                output_split_sizes = self.output_splits_tp.tolist()
+            global_input_tokens = gather_from_sequence_parallel_region(
+                global_input_tokens, self.tp_group, output_split_sizes=output_split_sizes
+            )
+            global_probs = gather_from_sequence_parallel_region(
+                global_probs, self.tp_group, output_split_sizes=output_split_sizes
+            )
+
+        # Permutation 2: Sort tokens by local experts.
+        self.tokens_per_expert = self._maybe_d2h_and_synchronize(
+            "before_permutation_2", self.tokens_per_expert
+        )
+        if self.num_local_experts > 1:
+            if self.drop_and_pad:
+                global_input_tokens = (
+                    global_input_tokens.view(
+                        self.tp_size * self.ep_size,
+                        self.num_local_experts,
+                        self.capacity,
+                        *global_input_tokens.shape[1:],
+                    )
+                    .transpose(0, 1)
+                    .contiguous()
+                    .flatten(start_dim=0, end_dim=2)
+                )
+                global_probs = (
+                    global_probs.view(
+                        self.tp_size * self.ep_size,
+                        self.num_local_experts,
+                        self.capacity,
+                        *global_probs.shape[1:],
+                    )
+                    .transpose(0, 1)
+                    .contiguous()
+                    .flatten(start_dim=0, end_dim=2)
+                )
+            else:
+                global_input_tokens, global_probs = sort_chunks_by_idxs(
+                    global_input_tokens,
+                    self.num_global_tokens_per_local_expert.ravel(),
+                    self.sort_input_by_local_experts,
+                    probs=global_probs,
+                    fused=self.config.moe_permute_fusion,
+                )
+        tokens_per_expert = self._maybe_d2h_and_synchronize(
+            "before_finish", self.tokens_per_expert
+        )
+        self.tokens_per_expert = None
+        return global_input_tokens, tokens_per_expert, global_probs
+    
