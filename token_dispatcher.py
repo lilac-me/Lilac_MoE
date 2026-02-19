@@ -3,6 +3,8 @@ from abc import abstractmethod
 
 import torch
 from torch import Tensor
+
+from moe_utils import maybe_move_tensor_to_cpu
 """
     We use the following notation throughout the codebase:
     H: hidden size
