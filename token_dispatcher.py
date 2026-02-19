@@ -700,3 +700,104 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         self.tokens_per_expert = None
         return global_input_tokens, tokens_per_expert, global_probs
     
+    def combine_preprocess(self, hidden_states: Tensor) -> Tensor:
+        """
+        Prepares hidden states for token combination after expert computations.
+
+        This may involves un-sorting tokens and Reduce-Scatter in the tensor parallelism
+        """
+        # Unpermutation2: Unsort tokens by local experts.
+        if self.num_local_experts > 1:
+            if self.drop_and_pad:
+                hidden_states = (
+                    hidden_states.view(
+                        self.num_local_experts,
+                        self.tp_size * self.ep_size,
+                        self.capacity,
+                        *hidden_states.size()[1:],
+                    )
+                    .transpose(0, 1)
+                    .contiguous()
+                    .flatten(start_dim=0, end_dim=2)
+                )
+            else:
+                hidden_states, _ = sort_chunks_by_idxs(
+                    hidden_states,
+                    self.num_global_tokens_per_local_expert.T.ravel(),
+                    self.restore_output_by_local_experts,
+                    fused=self.config.moe_permute_fusion
+                )
+        
+        if self.tp_size > 1:
+            if self.output_splits_tp is None:
+                input_split_sizes = None
+            else:
+                input_split_sizes = self.output_splits_tp.tolist()
+            hidden_states = reduce_scatter_to_sequence_parallel_region(
+                hidden_states.to(self.probs.dtype),
+                group=self.tp_group,
+                input_split_sizes=input_split_sizes
+            ).to(hidden_states.dtype)
+        
+        return hidden_states
+    
+    def token_combine(self, hidden_states: Tensor, async_finish: bool = True, allocate_on_comm_stream: bool = True) -> Tensor:
+        """
+        Executes fused unpermutation and communication using DeepEP kernel.
+
+        This method performs the inverse AlltoAll communication operation to collect expert
+        outputs from their processing ranks and redistribute them back to the ranks that originally
+        held the corresponding tokens. This completes the expert processing communication pattern
+        and prepares tokens for final unpermutation.
+
+        Args:
+            hidden_states: expert outputs ready for conbination.
+            async_finish: whether to use asynchronous communication completion.
+            allocate_on_comm_stream: whether to allocate buffers on communication stream
+        
+        Returns: tokens after All-t-oAll communication for combining.
+        """
+        # Perform expert parallel AlltAll communication
+        # hidden_states: [SEQL, H] -> [H, SEQL/TP]
+        permutated_local_input_tokens = all_to_all(
+            self.ep_group, hidden_states, self.input_splits, self.output_splits
+        )
+        return permutated_local_input_tokens
+    
+    def combine_postprocess(self, permutated_local_input_tokens: Tensor) -> Tensor:
+        """
+        Finalize token reconstruction with unpermutation and reshaping.
+
+        This method unpermutes the tokens back to their original order,
+        reshapes the tensor to its original shape, and adds the shared expert 
+        output if enabled.
+
+        Args:
+            permutated_local_input_tokens: permuted hidden states from token combine.
+
+        Returns:
+            the final MoE layer output reshaped to its original dimensions.
+        """
+        if self.shared_experts is not None:
+            self.shared_experts.linear_fc2_forward(permutated_local_input_tokens)
+            self.shared_experts.post_forward_comm()
+
+        # Unpermutation 1: AlltoAll output to output
+        output = permute(
+            permutated_local_input_tokens,
+            self.reversed_local_input_permutation_mapping,
+            restore_shape=self.hidden_shape_before_permute,
+            routing_map=self.routing_map,
+            fused=self.config.moe_permute_fusion,
+            drop_and_pad=self.drop_and_pad
+        )
+
+        # Reshape the output tensor
+        output = output.view(self.hidden_shape)
+
+        # Add shared expert output
+        if self.shared_experts is not None:
+            shared_expert_output = self.shared_experts.get_output()
+            output += shared_expert_output
+        return output
+    
