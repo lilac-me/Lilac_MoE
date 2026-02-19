@@ -801,3 +801,54 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             output += shared_expert_output
         return output
     
+    def _maybe_update_cuda_sync_point(self, point: str):
+        """
+        Update the cuda sync point if the priority of the new point is higher than the current
+        sync point, which means the new point is reached earlier than the current sync point.
+        """
+        if (
+            self.cuda_sync_point_priority[point]
+            < self.cuda_sync_point_priority[self.cuda_sync_point]
+        ):
+            self.cuda_sync_point = point
+
+    def _maybe_d2h_and_synchronize(
+        self, point: str, tokens_per_expert: Optional[Tensor] = None
+    ) -> Tensor:
+        """
+        Move all possible device tensors to host and make a synchronization at the expected point.
+        """
+        if not self.drop_and_pad:
+            if point == self.cuda_sync_point:
+                # Move all possible device tensors to host at self.cuda_d2h_point.
+                on_side_stream = torch.cuda.Stream() != self.d2h_stream
+                if on_side_stream:
+                    self.d2h_stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(self.d2h_stream):
+                    tokens_per_expert = maybe_move_tensor_to_cpu(
+                        tokens_per_expert, record_stream=on_side_stream
+                    )
+                    self.input_splits = maybe_move_tensor_to_cpu(
+                        self.input_splits, record_stream=on_side_stream
+                    )
+                    self.output_splits = maybe_move_tensor_to_cpu(
+                        self.output_splits, record_stream=on_side_stream
+                    )
+                    self.output_splits_tp = maybe_move_tensor_to_cpu(
+                        self.output_splits_tp, record_stream=on_side_stream
+                    )
+                    self.num_out_tokens = maybe_move_tensor_to_cpu(
+                        self.num_out_tokens, record_stream=on_side_stream
+                    )
+                    if self.num_local_experts > 1 and not self.config.moe_permute_fusion:
+                        self.num_global_tokens_per_local_expert = maybe_move_tensor_to_cpu(
+                            self.num_global_tokens_per_local_expert, record_stream=on_side_stream
+                        )
+                self.d2h_event = self.d2h_stream.record_event()
+
+            if point == self.cuda_sync_point:
+                # Synchronize with the d2h stream at self.cuda_sync_point.
+                self.d2h_event.synchronize()
+            
+        return tokens_per_expert
+    
