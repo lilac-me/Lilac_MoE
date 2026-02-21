@@ -4,7 +4,11 @@ from abc import abstractmethod
 import torch
 from torch import Tensor
 
-from moe_utils import get_capacity, maybe_move_tensor_to_cpu
+from moe_utils import (
+    get_capacity,
+    maybe_move_tensor_to_cpu,
+    permute
+)
 """
     We use the following notation throughout the codebase:
     H: hidden size
