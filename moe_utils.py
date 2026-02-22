@@ -60,7 +60,7 @@ def permute(
         routing_map: the sparse token to expert mapping, [num_tokens, num_experts]
         probs: the prob tensor, [num_tokens, num_experts]
         num_out_tokens: the number of output tokens. If None, it's set to the number of input tokens.
-        fused: whether use the fused permute function.
+        fused: whether to use the fused permute function.
         drop_and_pad: whether or not the token dispatcher uses token-drop and pads the number
                       of tokens to the expert capacity. If set to true, routing_map has a fixed
                       number of non-zeros in each column.
@@ -124,6 +124,92 @@ def permute(
     permuted_input = tokens.index_select(0, sorted_indices)
 
     return permuted_input, permuted_probs, sorted_indices, None, tokens_per_expert
+
+
+def unpermute(
+    permuted_tokens: Tensor,
+    sorted_indices: Tensor,
+    restore_shape: torch.Size,
+    probs: Optional[Tensor] = None,
+    routing_map: Optional[Tensor] = None,
+    fused: bool = False,
+    drop_and_pad: bool = False,
+    pad_offsets: Optional[Tensor] = None,
+) -> Tensor:
+    """
+    Restore the original order of tokens after permutation. If probs is not None, it will
+    also apply them to the tokens before restoring the order.
+
+    When drop_and_pad=Ttue, the tensors will have the following properties:
+        - in routing_map, the number of non-zeros in each column equals to expert capacity.
+        - the size of sorted_indices equals to num_experts * capacity, each splits of 'capacity'
+          contains the indices of tokens routed to an expert.
+    This function exploits these features to use ops that support cuda graph.
+
+    Args:
+        permuted_tokens: the permuted token tensor.
+        sorted_indices: the indices used to sort the tokens.
+        restore_shape: the shape of the unpermuted tensor.
+        probs: the permuted probs tensor.
+        routing_map: token to expert mapping, shape [num_tokens, num_experts]
+        fused: whether to use fused unpermute function.
+        drop_and_pad: whether or not the token dispatcher uses token-drop and pads the number of
+                      tokens to the expert capacity.
+        pad_offsets:
+            tensor of per-expert cumulative padding offsets used to remove padding added during
+            permutation. This is the fourth output of 'moe_permute_and_pad_with_probs' and is 
+            required when unpermuting padded outputs. Default to None
+
+    Returns:
+        the tokens restored to their original order.
+    """
+    _, hidden_size = restore_shape
+    input_dtype = permuted_tokens.dtype
+
+    if probs is not None:
+        assert routing_map is not None, "Mask must be provided to permute the probs."
+        if drop_and_pad:
+            num_experts = routing_map.size()[1]
+            num_permuted_tokens = sorted_indices.size()[0]
+            capacity = num_permuted_tokens // num_experts
+            num_unpermuted_tokens = probs.size()[0]
+
+            # [num_unpermuted_tokens, num_experts] -> num_experts * num_unpermuted_tokens
+            probs_T_1D = probs.T.contiguous().view(-1)
+            # get 1D indices of the probs selected by routing_map
+            # indices_dim0 is expert range
+            indices_dim0 = torch.arange(num_experts, device=routing_map.device).unsqueeze(-1)
+            indices_dim1 = sorted_indices.view(num_experts, capacity)
+            indices_1D = (indices_dim0 * num_unpermuted_tokens + indices_dim1).view(-1)
+
+            # get probs from indices
+            permuted_probs = probs_T_1D.index_select(0, indices_1D)
+        else:
+            permuted_probs = probs.T.contiguous().masked_select(routing_map.T.contiguous())
+        # Here may promote permuted_tokens to higher precision (fp32/fp64) if probs is in 
+        # higher precision due to moe_router_dtype being enabled. This can lead to additional
+        # device memory usage. Use --moe-permute-fusion flag to avoid this extra memory allocation.
+        permuted_tokens = permuted_tokens * permuted_probs.unsqueeze(-1)
+    
+    # Create an output tensor filled with zeros.
+    output_tokens = torch.zeros(
+        restore_shape, dtype=permuted_tokens.dtype, device=permuted_tokens.device
+    )
+    if torch.are_deterministic_algorithms_enabled():
+        # use index_add which is deterministic the deterministic algorithm are enabled and
+        # is cuda graph compatible
+        output_tokens = torch.zeros(
+            restore_shape, dtype=permuted_tokens.dtype, device=permuted_tokens.device
+        )
+        # index_add is deterministic when torch.use_deterministic_algorithms(True) is set 
+        # and cuda graph compatible unlike scatter_add
+        output_tokens.index_add_(0, sorted_indices, permuted_tokens)
+    else:
+        # scatter add the permuted_tokens back to the original positions
+        output_tokens.scatter_add_(
+            0, sorted_indices.unsqueeze(1).expand(-1, hidden_size), permuted_tokens
+        )
+    return output_tokens.to(dtype=input_dtype)
 
 
 def maybe_move_tensor_to_cpu(

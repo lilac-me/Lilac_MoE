@@ -7,7 +7,8 @@ from torch import Tensor
 from moe_utils import (
     get_capacity,
     maybe_move_tensor_to_cpu,
-    permute
+    permute,
+    unpermute,
 )
 """
     We use the following notation throughout the codebase:
