@@ -212,6 +212,37 @@ def unpermute(
     return output_tokens.to(dtype=input_dtype)
 
 
+def sort_chunks_by_idx(
+    input: Tensor,
+    split_sizes: Tensor,
+    sorted_idxs: Tensor,
+    probs: Optional[Tensor] = None,
+    fused: bool = False,
+) -> Tuple[Tensor, Optional[Tensor]]:
+    """
+    Split and sort the input tensor based on the split_sizes and sorted_indices.
+
+    Args:
+        input: the input tensor.
+        split_sizes: the split sizes.
+        sorted_idxs: the sorted indices.
+        probs: the probs tensor. Default to None.
+        fused: whether to use the fused version of the sorted_chunks_by_idxs function.
+               Default to False.
+    
+    Returns:
+        the sorted output tensor and permuted probs.
+    """
+    input = torch.split(input, split_sizes.tolist(), dim=0)
+    output = torch.cat([input[i] for i in sorted_idxs.tolist()], dim=0)
+    if probs is not None:
+        probs = torch.split(probs, split_sizes.tolist(), dim=0)
+        permuted_probs = torch.cat([probs[i] for i in sorted_idxs.tolist()], dim=0)
+    else:
+        permuted_probs = None
+    return output, permuted_probs
+
+
 def maybe_move_tensor_to_cpu(
     tensor: Tensor, as_numpy: bool = False, record_stream: bool = False
 ) -> Tensor:
