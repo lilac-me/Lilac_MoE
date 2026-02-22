@@ -212,7 +212,7 @@ def unpermute(
     return output_tokens.to(dtype=input_dtype)
 
 
-def sort_chunks_by_idx(
+def sort_chunks_by_idxs(
     input: Tensor,
     split_sizes: Tensor,
     sorted_idxs: Tensor,

@@ -9,7 +9,7 @@ from moe_utils import (
     maybe_move_tensor_to_cpu,
     permute,
     unpermute,
-    sort_chunks_by_idx,
+    sort_chunks_by_idxs,
 )
 """
     We use the following notation throughout the codebase:
