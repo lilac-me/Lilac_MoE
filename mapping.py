@@ -23,7 +23,7 @@ def _gather_along_first_dim(input_, group, output_split_sizes=None, use_global_b
             output = get_global_memory_buffer().get_tensor(dim_size, input_.dtype, "mpu")
         else:
             output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
-        dist_all_gather_func(output, input_.contiguous(), group=group)
+        torch.distributed.all_gather_into_tensor(output, input_.contiguous(), group=group)
     else:
         dim_size[0] = sum(output_split_sizes)
         if use_global_buffer:
@@ -33,6 +33,44 @@ def _gather_along_first_dim(input_, group, output_split_sizes=None, use_global_b
         output_tensor_list = list(torch.split(output, output_split_sizes, dim=0))
         torch.distributed.all_gather(output_tensor_list, input_, group=group)
 
+    return output
+
+
+def _reduce_scatter_along_first_dim(input_, group, input_split_sizes=None, use_global_buffer=False):
+    """
+    Reduce-Scatter the input tensor across model parallel group.
+
+    Args:
+        input_: the input tensor to be reduce-scattered
+        input_split_sizes: List[int], a list of specifying the sizes of the input splits along the 
+                           first dimension for each rank. If None, equal splitting is assumed. Default to None.
+    """
+    assert group is not None, "group should not be None"
+    world_size = group.size()
+    if world_size == 1:
+        return input_
+    
+    if input_split_sizes is None:
+        dim_size = list(input_.size())
+        assert(
+            dim_size[0] % world_size == 0
+        ), "First dimension of the tensor should be divisible by tensor parallel size."
+        dim_size[0] = dim_size[0] // world_size
+
+        if use_global_buffer:
+            output = get_global_memory_buffer().get_tensor(dim_size, input_.dtype, "mpu")
+        else:
+            output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
+        torch.distributed.reduce_scatter_tensor(output, input_.contiguous(), group=group)
+    else:
+        rank = group.rank()
+        input_tensor_list = list(torch.split(input_, input_split_sizes, dim=0))
+        if use_global_buffer:
+            output = get_global_memory_buffer().get_tensor(input_tensor_list[rank].shape, input_.dtype, "mpu")
+        else:
+            output = torch.empty_like(input_tensor_list[rank])
+        torch.distributed.reduce_scatter(output, input_tensor_list, group=group)
+    
     return output
 
 
