@@ -222,8 +222,8 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
 
         Args:
             hidden_states (Tensor): 3D [S/TP, B, H].
-            routing_map (Tensor): 2D [S/TP*B, num_experts].
-            probs (Tensor): 2D [S/TP*B, num_experts].
+            routing_map (Tensor): 2D [S/TP*B, num_experts]
+            probs (Tensor): 2D [S/TP*B, num_experts]
         """
         self.hidden_shape = hidden_states.shape # [S/TP, B, H]
         # [S/TP, B, H] -> [S/TP*B, H]
@@ -280,7 +280,7 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
 
         (permuted_local_hidden_states, _, self.reversed_local_input_permutation_mapping) = permute(
             hidden_states, # [S*B*EP, H]
-            self.local_map, # [S*B*EP, num_local_experts]
+            self.local_map, # [S*B*EP, num_local_experts] also [num_tokens, num_experts]
             num_out_tokens=tokens_per_expert.sum().item(),
             fused=self.config.moe_permute_fusion,
         )
@@ -295,7 +295,7 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
         self.routing_map = None
         return permuted_local_hidden_states, tokens_per_expert, self.local_probs
     
-    def combine_postprocess(self, hidden_states: Tensor) -> Tensor:
+    def combine_preprocess(self, hidden_states: Tensor) -> Tensor:
         """
         Reverses token permutation to restore original ordering before reduction operations.
 
@@ -333,7 +333,7 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
             ).to(hidden_states.dtype)
         return hidden_states
     
-    def combine_preprocess(self, hidden_states: Tensor) -> Tensor:
+    def combine_postprocess(self, hidden_states: Tensor) -> Tensor:
         """
         Restoring the original tensor shape..
 
