@@ -101,7 +101,6 @@ class _GatherFromSequenceParallelRegion(torch.autograd.Function):
         input_,
         group,
         tensor_parallel_output_grad=True,
-        otuput_split_sizes=None,
         use_global_buffer=False,
     ):
         """
@@ -115,12 +114,10 @@ class _GatherFromSequenceParallelRegion(torch.autograd.Function):
         input_,
         group,
         tensor_parallel_output_grad=True,
-        output_split_sizes=None,
         use_global_buffer=False,
     ):
         ctx.group = group
         ctx.tensor_parallel_output_grad = tensor_parallel_output_grad
-        ctx.output_split_sizes = output_split_sizes
         ctx.use_global_buffer = use_global_buffer
         return _gather_along_first_dim(input_, group, use_global_buffer)
     
@@ -135,7 +132,7 @@ class _GatherFromSequenceParallelRegion(torch.autograd.Function):
         if tensor_parallel_output_grad:
             return (
                 _reduce_scatter_along_first_dim(
-                    grad_output, ctx.group, ctx.output_split_sizes, ctx.use_global_buffer
+                    grad_output, ctx.group, ctx.use_global_buffer
                 ),
                 None,
                 None,
@@ -143,5 +140,4 @@ class _GatherFromSequenceParallelRegion(torch.autograd.Function):
                 None
             )
         else:
-            assert ctx.output_split_sizes is not None
             return (_split_along_first_dim(grad_output, ctx.group), None, None, None, None)
