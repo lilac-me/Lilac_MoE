@@ -54,6 +54,28 @@ def _reduce_scatter_along_first_dim(input_, group, use_global_buffer=False):
     return output
 
 
+def _split_along_first_dim(input_, group):
+    """
+    Split the tensor along its first dimension and keep the correponding slices.
+    """
+    assert group is not None, "group should not be None"
+    world_size = group.size()
+    if world_size == 1:
+        return input_
+    
+    dim_size = input_.size(0)
+    assert(
+        dim_size % world_size == 0
+    ), "First dimension of the tensor should be divisible by tensor parallel size."
+    local_dim_size = dim_size // world_size
+    rank = group.rank()
+    dim_offset = rank * local_dim_size
+    
+    output = input_[dim_offset: dim_offset + local_dim_size].contiguous()
+
+    return output
+
+
 def gather_from_sequence_parallel_region(
     input_,
     tensor_parallal_output_grad=True,
