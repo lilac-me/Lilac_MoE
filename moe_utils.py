@@ -9,6 +9,7 @@ from torch import Tensor
 
 
 _GLOBAL_MEMORY_BUFFER = None
+device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
 
 
 class GlobalMemoryBuffer:
@@ -33,7 +34,7 @@ class GlobalMemoryBuffer:
                 self.buffer[(name, dtype)] = torch.empty(
                     required_len,
                     dtype=dtype,
-                    device=torch.cuda.current_device(),
+                    device=device,
                     requires_grad=False,
                 )
         return self.buffer[(name, dtype)][0:required_len].view(*tensor_shape)

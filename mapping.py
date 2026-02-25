@@ -1,7 +1,10 @@
 from typing import Any
 import torch
 
-from moe_utils import get_global_memory_buffer()
+from moe_utils import get_global_memory_buffer
+
+
+device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
 
 
 def _gather_along_first_dim(input_, group, use_global_buffer=False):
@@ -22,7 +25,7 @@ def _gather_along_first_dim(input_, group, use_global_buffer=False):
     if use_global_buffer:
         output = get_global_memory_buffer().get_tensor(dim_size, input_.dtype, "mpu")
     else:
-        output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
+        output = torch.empty(dim_size, dtype=input_.dtype, device=device)
     torch.distributed.all_gather_into_tensor(output, input_.contiguous(), group=group)
 
     return output
@@ -50,7 +53,7 @@ def _reduce_scatter_along_first_dim(input_, group, use_global_buffer=False):
     if use_global_buffer:
         output = get_global_memory_buffer().get_tensor(dim_size, input_.dtype, "mpu")
     else:
-        output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
+        output = torch.empty(dim_size, dtype=input_.dtype, device=device)
     torch.distributed.reduce_scatter_tensor(output, input_.contiguous(), group=group)
     
     return output
