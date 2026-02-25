@@ -1,8 +1,52 @@
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Callable
 import math
+from functools import reduce
+import operator
+from contextlib import nullcontext
 
 import torch
 from torch import Tensor
+
+
+_GLOBAL_MEMORY_BUFFER = None
+
+
+class GlobalMemoryBuffer:
+    """
+    Global buffer to avoid dynamic memory allocations.
+    Caller should ensure that buffers of the same name are not used concurrently.
+    """
+    def __init__(self):
+        self.buffer = {}
+    
+    def get_tensor(self, tensor_shape, dtype, name, mem_alloc_context: Optional[Callable] = None):
+        """
+        Return a sub-tensor from the self.buffer for the given shape.
+        """
+        required_len = reduce(operator.mul, tensor_shape, 1)
+        if (
+            self.buffer.get((name, dtype), None) is None
+            or self.buffer[(name, dtype)].numel() < required_len
+        ):
+            mem_alloc_context = mem_alloc_context if mem_alloc_context else nullcontext
+            with mem_alloc_context():
+                self.buffer[(name, dtype)] = torch.empty(
+                    required_len,
+                    dtype=dtype,
+                    device=torch.cuda.current_device(),
+                    requires_grad=False,
+                )
+        return self.buffer[(name, dtype)][0:required_len].view(*tensor_shape)
+
+
+def get_global_memory_buffer():
+    """
+    Get the global memory buffer.
+    """
+    global _GLOBAL_MEMORY_BUFFER
+    if _GLOBAL_MEMORY_BUFFER is None:
+        _GLOBAL_MEMORY_BUFFER = GlobalMemoryBuffer()
+    return _GLOBAL_MEMORY_BUFFER
 
 
 def get_capacity(

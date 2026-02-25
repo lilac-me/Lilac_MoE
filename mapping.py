@@ -1,6 +1,8 @@
 from typing import Any
 import torch
 
+from moe_utils import get_global_memory_buffer()
+
 
 def _gather_along_first_dim(input_, group, use_global_buffer=False):
     """
