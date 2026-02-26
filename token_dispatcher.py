@@ -264,16 +264,18 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
     
     def dispatch_postprocess(self, hidden_states: Tensor, probs: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """
-        After gatherting these  tokens, this method identifies the tokens for local experts and
+        After gatherting these tokens, this method identifies the tokens for local experts and
         permutes the tokens to group them by expert for efficient expert processing.
 
         Args:
             hidden_states (Tensor): 2D [S*B*EP, H].
             probs (Tensor): 2D [S*B*EP, num_experts].
         """
-        self.hidden_shape_before_permute = hidden_states.shape
+        self.hidden_shape_before_permute = hidden_states.shape # [S*B*EP, H]
 
-        # The routing map and probs that for local experts. [S*B*EP, num_local_experts]
+        # Note that the self.routing_map shape is [S*B*EP, num_experts], and the local experts 
+        # are a subset of the global experts, so we can slice the routing map to get the local map.
+        # Whose shape is [S*B*EP, num_local_experts]
         self.local_map = self.routing_map[
             :, self.local_expert_indices[0] : self.local_expert_indices[-1] + 1
         ].contiguous()
@@ -284,11 +286,10 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
 
         tokens_per_expert = self.local_map.sum(dim=0).long().cpu() # [num_local_experts]
 
-        (permuted_local_hidden_states, _, self.reversed_local_input_permutation_mapping) = permute(
+        permuted_local_hidden_states, _, self.reversed_local_input_permutation_mapping, _, _ = permute(
             hidden_states, # [S*B*EP, H]
-            self.local_map, # [S*B*EP, num_local_experts] also [num_tokens, num_experts]
+            self.local_map, # [S*B*EP, num_local_experts] -> [num_local_tokens, num_local_experts]
             num_out_tokens=tokens_per_expert.sum().item(),
-            fused=self.config.moe_permute_fusion,
         )
         # permuted_local_hidden_states: [num_local_tokens, H]
         # self.reversed_local_input_permutation_mapping: [num_local_tokens]

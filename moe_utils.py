@@ -76,7 +76,6 @@ def permute(
     routing_map: Tensor,
     probs: Optional[Tensor] = None,
     num_out_tokens: Optional[Tensor] = None,
-    fused: bool = False,
     drop_and_pad: bool = False,
     tokens_per_expert: Optional[Tensor] = None,
     align_size: int = -1,
@@ -105,7 +104,6 @@ def permute(
         routing_map: the sparse token to expert mapping, [num_tokens, num_experts]
         probs: the prob tensor, [num_tokens, num_experts]
         num_out_tokens: the number of output tokens. If None, it's set to the number of input tokens.
-        fused: whether to use the fused permute function.
         drop_and_pad: whether or not the token dispatcher uses token-drop and pads the number
                       of tokens to the expert capacity. If set to true, routing_map has a fixed
                       number of non-zeros in each column.
@@ -126,27 +124,27 @@ def permute(
             (optional) pad_offsets
             (optional) padded_tokens_per_expert
     """
-    num_tokens, hidden_size = tokens.shape
-    num_experts = routing_map.size()[1]
+    num_tokens, hidden_size = tokens.shape # [S*B*EP, H] -> [num_tokens, hidden_size]
+    num_experts = routing_map.size()[1] # [num_local_experts]
     permuted_probs = None
     if drop_and_pad and num_out_tokens is not None:
         capacity = num_out_tokens // num_experts
         assert not routing_map.requires_grad
-        # mask [num_tokens, num_experts] -> [num_experts, num_tokens]
+        # mask [num_tokens, num_local_experts] -> [num_local_experts, num_tokens]
         routing_map = routing_map.to(dtype=torch.int8).T.contiguous()
         # use argsort to put indices of all non-zeros in the beginning of list
         # and keep the first capacity number of indices.
         sorted_indices = routing_map.argsort(dim=-1, descending=True, stable=True)[
             :, :capacity
         ].contiguous()
-        # flatten from [num_experts, capacity] to 1D
-        sorted_indices = sorted_indices.view(-1)
+        # flatten from [num_local_experts, capacity] to 1D
+        sorted_indices = sorted_indices.view(-1) # [num_local_experts*capacity]
 
         if probs is not None:
-            # [num_tokens, num_experts] -> num_experts * num_tokens
+            # [num_tokens, num_local_experts] -> num_local_experts * num_tokens
             probs_T_1D = probs.T.contiguous().view(-1)
             # get 1D indices of the probs selected by routing_map
-            # indices_dim0 is expert range
+            # indices_dim0 is expert range for shape of [num_local_experts]
             indices_dim0 = torch.arange(num_experts, device=routing_map.device).unsqueeze(-1)
             indices_dim1 = sorted_indices.view(num_experts, capacity)
             # expert_id * num_tokens + token_id
@@ -154,12 +152,12 @@ def permute(
             # get probs from indices
             permuted_probs = probs_T_1D.index_select(0, indices_1D)
     else:
-        # mask [num_tokens, num_experts] -> [num_experts, num_tokens]
+        # mask [num_tokens, num_local_experts] -> [num_local_experts, num_tokens]
         routing_map = routing_map.bool().T.contiguous()
         # Create a dense expert-to-token mapping from the sparse token-to-expert mapping
         token_indices = (
             torch.arange(num_tokens, device=routing_map.device).unsqueeze(0).expand(num_experts, -1)
-        )
+        ) # [num_local_experts, num_tokens]
         sorted_indices = token_indices.masked_select(routing_map)
         
         if probs is not None:
