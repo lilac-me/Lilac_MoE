@@ -297,8 +297,8 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
         self.local_probs = self.local_probs.T.contiguous().masked_select(
             self.local_map.T.contiguous()
         )
-        # self.local_probs.T: [num_local_tokens, S*B*EP]
-        # self.local_map.T: [num_local_tokens, S*B*EP]
+        # self.local_probs.T: [num_local_experts, S*B*EP]
+        # self.local_map.T: [num_local_experts, S*B*EP]
         self.routing_map = None
         return permuted_local_hidden_states, tokens_per_expert, self.local_probs
     
@@ -312,7 +312,7 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
         operation that will aggregate results across ranks.
         """
         unpermuted_local_hidden_states = unpermute(
-            hidden_states,
+            hidden_states, # [num_local_tokens, H]
             self.reversed_local_input_permutation_mapping,
             restore_shape=self.hidden_shape_before_permute,
             routing_map=self.local_map,
