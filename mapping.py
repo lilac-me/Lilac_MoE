@@ -83,16 +83,16 @@ def _split_along_first_dim(input_, group):
 
 def gather_from_sequence_parallel_region(
     input_,
-    tensor_parallal_output_grad=True,
+    tensor_parallel_output_grad=True,
     group=None,
-    use_golbal_buffer=False,
+    use_global_buffer=False,
 ):
     """
     Wrapper for autograd function: forward: AG, backward: RS <first_dim>.
     """
     group = get_tensor_model_parallel_group_if_none(group)
     return _GatherFromSequenceParallelRegion.apply(
-        input_, group, tensor_parallal_output_grad, use_golbal_buffer
+        input_, group, tensor_parallel_output_grad, use_global_buffer
     )
 
 
