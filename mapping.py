@@ -96,6 +96,20 @@ def gather_from_sequence_parallel_region(
     )
 
 
+def reduce_scatter_to_sequence_parallel_region(
+    input_,
+    group=None,
+    use_global_buffer=False,
+):
+    """
+    Wrapper for autograd function: forward: RS, backward: AG <first_dim>.
+    """
+    group = get_tensor_model_parallel_group_if_none(group)
+    return _ReduceScatterToSequenceParallelRegion.apply(
+        input_, group, use_global_buffer
+    )
+
+
 class _GatherFromSequenceParallelRegion(torch.autograd.Function):
     """
     Gather the input from sequence parallel region and concatenate.
@@ -146,3 +160,36 @@ class _GatherFromSequenceParallelRegion(torch.autograd.Function):
             )
         else:
             return (_split_along_first_dim(grad_output, ctx.group), None, None, None, None)
+
+
+class _ReduceScatterToSequenceParallelRegion(torch.autograd.Function):
+    """
+    Reduce-Scatter the input from the sequence parallel region.
+    """
+    @staticmethod
+    def symbolic(
+        graph,
+        input_,
+        group,
+        use_global_buffer=False,
+    ):
+        """
+        Symbolic function for tracing.
+        """
+        return _reduce_scatter_along_first_dim(input_, group, use_global_buffer)
+    
+    @staticmethod
+    def forward(ctx, input_, group, use_global_buffer=False):
+        ctx.group = group
+        ctx.use_global_buffer = use_global_buffer
+        return _reduce_scatter_along_first_dim(input_, group, use_global_buffer)
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        use_global_buffer = ctx.use_global_buffer
+        return (
+            _gather_along_first_dim(grad_output, ctx.group, use_global_buffer),
+            None,
+            None,
+            None,
+        )

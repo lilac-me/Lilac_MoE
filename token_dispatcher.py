@@ -11,6 +11,12 @@ from moe_utils import (
     unpermute,
     sort_chunks_by_idxs,
 )
+from mapping import (
+    gather_from_sequence_parallel_region,
+    reduce_scatter_to_sequence_parallel_region,
+)
+
+
 """
     We use the following notation throughout the codebase:
     H: hidden size
