@@ -316,7 +316,6 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
             self.reversed_local_input_permutation_mapping,
             restore_shape=self.hidden_shape_before_permute,
             routing_map=self.local_map,
-            fused=self.config.moe_permute_fusion,
         )
         # unpermuted_local_hidden_states: [S*B*EP, H]
         return unpermuted_local_hidden_states
@@ -613,7 +612,6 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             self.routing_map,
             probs=probs,
             num_out_tokens=self.num_out_tokens,
-            fused=self.config.moe_permute_fusion,
             drop_and_pad=self.drop_and_pad,
         )
         return permuted_local_input_tokens, permuted_probs
@@ -707,7 +705,6 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
                     self.num_global_tokens_per_local_expert.ravel(),
                     self.sort_input_by_local_experts,
                     probs=global_probs,
-                    fused=self.config.moe_permute_fusion,
                 )
         tokens_per_expert = self._maybe_d2h_and_synchronize(
             "before_finish", self.tokens_per_expert
@@ -740,7 +737,6 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
                     hidden_states,
                     self.num_global_tokens_per_local_expert.T.ravel(),
                     self.restore_output_by_local_experts,
-                    fused=self.config.moe_permute_fusion
                 )
         
         if self.tp_size > 1:
@@ -803,7 +799,6 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             self.reversed_local_input_permutation_mapping,
             restore_shape=self.hidden_shape_before_permute,
             routing_map=self.routing_map,
-            fused=self.config.moe_permute_fusion,
             drop_and_pad=self.drop_and_pad
         )
 

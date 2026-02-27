@@ -175,7 +175,6 @@ def unpermute(
     restore_shape: torch.Size,
     probs: Optional[Tensor] = None,
     routing_map: Optional[Tensor] = None,
-    fused: bool = False,
     drop_and_pad: bool = False,
     pad_offsets: Optional[Tensor] = None,
 ) -> Tensor:
@@ -195,7 +194,6 @@ def unpermute(
         restore_shape: the shape of the unpermuted tensor.
         probs: the permuted probs tensor.
         routing_map: token to expert mapping, shape [num_tokens, num_experts]
-        fused: whether to use fused unpermute function.
         drop_and_pad: whether or not the token dispatcher uses token-drop and pads the number of
                       tokens to the expert capacity.
         pad_offsets:
@@ -260,7 +258,6 @@ def sort_chunks_by_idxs(
     split_sizes: Tensor,
     sorted_idxs: Tensor,
     probs: Optional[Tensor] = None,
-    fused: bool = False,
 ) -> Tuple[Tensor, Optional[Tensor]]:
     """
     Split and sort the input tensor based on the split_sizes and sorted_indices.
