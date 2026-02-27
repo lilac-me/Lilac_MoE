@@ -14,6 +14,7 @@ from moe_utils import (
 from mapping import (
     gather_from_sequence_parallel_region,
     reduce_scatter_to_sequence_parallel_region,
+    all_to_all,
 )
 
 
@@ -754,7 +755,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
     
     def token_combine(self, hidden_states: Tensor, async_finish: bool = True, allocate_on_comm_stream: bool = True) -> Tensor:
         """
-        Executes fused unpermutation and communication using DeepEP kernel.
+        Executes unpermutation and communication.
 
         This method performs the inverse AlltoAll communication operation to collect expert
         outputs from their processing ranks and redistribute them back to the ranks that originally
@@ -762,7 +763,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         and prepares tokens for final unpermutation.
 
         Args:
-            hidden_states: expert outputs ready for conbination.
+            hidden_states: expert outputs ready for combination.
             async_finish: whether to use asynchronous communication completion.
             allocate_on_comm_stream: whether to allocate buffers on communication stream
         

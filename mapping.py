@@ -110,6 +110,11 @@ def reduce_scatter_to_sequence_parallel_region(
     )
 
 
+def all_to_all(group, input_, output_split_sizes=None, input_split_sizes=None):
+    assert group is not None, "group should not be None"
+    _AllToAll.apply(group, input_, output_split_sizes, input_split_sizes)
+
+
 class _GatherFromSequenceParallelRegion(torch.autograd.Function):
     """
     Gather the input from sequence parallel region and concatenate.
@@ -193,3 +198,49 @@ class _ReduceScatterToSequenceParallelRegion(torch.autograd.Function):
             None,
             None,
         )
+    
+
+class _AllToAll(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, group, input_, output_split_sizes=None, input_split_sizes=None):
+        ctx.group = group
+        ctx.output_split_sizes = output_split_sizes
+        ctx.input_split_sizes = input_split_sizes
+
+        world_size = group.size()
+        if world_size == 1:
+            return input_
+        input_ = input_.contiguous()
+        if output_split_sizes is None:
+            # Equal split (all2all)
+            output = torch.empty_like(input_)
+        else:
+            # Unequal split (all2all-v)
+            output = torch.empty(
+                size=[sum(output_split_sizes)] + list(input_.size()[1:]),
+                dtype=input_.dtype,
+                device=input_.device,
+            )
+        torch.distributed.all_to_all_single(
+            output,
+            input_,
+            output_split_sizes=output_split_sizes,
+            input_split_sizes=input_split_sizes,
+            group=group,
+        )
+        return output
+    
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        return (
+            None,
+            _AllToAll.apply(
+                ctx.group,
+                *grad_outputs,
+                output_split_sizes=ctx.input_split_sizes,
+                input_split_sizes=ctx.output_split_sizes,
+            ),
+            None,
+            None,
+        )
+    
