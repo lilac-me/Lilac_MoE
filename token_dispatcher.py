@@ -499,7 +499,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         else:
             # For dropless training, output size is static (num_tokens * topk)
             # No explicit synchronization is needed.
-            self.num_out_tokens = routing_map.size(0) * config.
+            self.num_out_tokens = routing_map.size(0) * config.moe_router_topk
         if self.ep_size > 1 or self.tp_size > 1:
             # Calculate 'input_splits', 'output_splits' for alltoall/allgather in variable size.
             # [ep_size]. Represents the number of tokens sent by the current rank to other EP ranks.
