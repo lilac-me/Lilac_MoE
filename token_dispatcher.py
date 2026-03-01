@@ -16,6 +16,7 @@ from mapping import (
     reduce_scatter_to_sequence_parallel_region,
     all_to_all,
 )
+from transformer_config import TransformerConfig
 
 
 """
@@ -586,7 +587,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         assert routing_map.dtype == torch.bool, "routing_map should be a boolean tensor"
         hidden_states = hidden_states.view(-1, self.hidden_shape[-1]) # [S/TP*B, H]
 
-        if config.moe_router_padding_for quantization:
+        if config.moe_router_padding_for_quantization:
             pad_multiple = get_align_size_for_quantization(self.config)
             if is_experimental_enabled() and self.config.moe_permute_fusion:
                 self.routing_map = fused_pad_routing_map(self.routing_map, pad_multiple)
@@ -598,7 +599,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             self.shared_experts.pre_foward_comm(hidden_states.view(self.hidden_shape))
 
         # Permutation 1: input to AlltoAll input
-        self.tokens_per_expert = self._maybe_d2h_and synchronize(
+        self.tokens_per_expert = self._maybe_d2h_and_synchronize(
             "before_permutation_1", self.tokens_per_expert
         )
         self.hidden_shape_before_permute = hidden_states.shape
