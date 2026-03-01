@@ -9,3 +9,4 @@ class TransformerConfig:
     moe_pad_expert_input_to_capacity: bool = False
     moe_expert_capacity_factor: float = 1.0
     moe_router_padding_for_quantization: bool = False
+    add_bias_linear: bool = False

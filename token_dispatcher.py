@@ -463,11 +463,11 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         """
         if self.drop_and_pad:
             # Drop and pad the input to capacity.
-            num_tokens = routing_map.size(0) * config.moe_router_topk
+            num_tokens = routing_map.size(0) * self.config.moe_router_topk
             self.capacity = get_capacity(
                 num_tokens=num_tokens,
                 num_experts=self.num_experts,
-                capacity_factor=self.moe_expert_capacity_factor,
+                capacity_factor=self.config.moe_expert_capacity_factor,
             )
             self.num_out_tokens = self.capacity * self.num_experts
             # [num_local_experts] number of tokens processed by each expert.
@@ -490,8 +490,8 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         num_local_tokens_per_expert = routing_map.sum(dim=0).long()
 
         if (
-            config.moe_expert_capacity_factor is not None
-            or config.moe_router_padding_for_quantization
+            self.config.moe_expert_capacity_factor is not None
+            or self.config.moe_router_padding_for_quantization
         ):
             # When using token dropping or router padding, output size is dynamic.
             # Need to sync output size device->host before allocating output buffer.
@@ -500,7 +500,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         else:
             # For dropless training, output size is static (num_tokens * topk)
             # No explicit synchronization is needed.
-            self.num_out_tokens = routing_map.size(0) * config.moe_router_topk
+            self.num_out_tokens = routing_map.size(0) * self.config.moe_router_topk
         if self.ep_size > 1 or self.tp_size > 1:
             # Calculate 'input_splits', 'output_splits' for alltoall/allgather in variable size.
             # [ep_size]. Represents the number of tokens sent by the current rank to other EP ranks.
@@ -587,12 +587,9 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         assert routing_map.dtype == torch.bool, "routing_map should be a boolean tensor"
         hidden_states = hidden_states.view(-1, self.hidden_shape[-1]) # [S/TP*B, H]
 
-        if config.moe_router_padding_for_quantization:
+        if self.config.moe_router_padding_for_quantization:
             pad_multiple = get_align_size_for_quantization(self.config)
-            if is_experimental_enabled() and self.config.moe_permute_fusion:
-                self.routing_map = fused_pad_routing_map(self.routing_map, pad_multiple)
-            else:
-                self.routing_map = pad_routing_map(self.routing_map, pad_multiple)
+            self.routing_map = pad_routing_map(self.routing_map, pad_multiple)
         self.tokens_per_expert = self.preprocess(self.routing_map)
 
         if self.shared_experts is not None:
@@ -637,10 +634,10 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             "before_ep_alltoall", self.tokens_per_expert
         )
         global_input_tokens = all_to_all(
-            permuted_local_input_tokens, self.input_splits, self.output_splits, group=self.ep_group
+            self.ep_group, permuted_local_input_tokens, self.input_splits, self.output_splits
         )
         global_probs = all_to_all(
-            permuted_probs, self.input_splits, self.output_splits, group=self.ep_group
+            self.ep_group, permuted_probs, self.input_splits, self.output_splits
         )
         return global_input_tokens, global_probs
 
