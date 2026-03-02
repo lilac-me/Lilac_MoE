@@ -90,7 +90,7 @@ def permute(
     Permute the tokens and probs bases on the mask.
 
     Tokens with the same designated expert will be grouped together.
-    The shape of the mask is [tokens, num_experts], it indicates which expert were selected
+    The shape of the mask is [num_global_tokens, num_local_experts], it indicates which expert were selected
     by each token.
 
     When drop_and_pad=True, in routing_map, the number of non-zeros in each column equals to
@@ -100,14 +100,14 @@ def permute(
     and return the padded permute tokens, pad_offsets and padded tokens per expert.
 
     Args:
-        tokens: the input token tensor, [num_tokens, hidden_size]
-        routing_map: the sparse token to expert mapping, [num_tokens, num_experts]
-        probs: the prob tensor, [num_tokens, num_experts]
+        tokens: the input token tensor, [num_global_tokens, hidden_size]
+        routing_map: the sparse token to expert mapping, [num_global_tokens, num_local_experts]
+        probs: the prob tensor, [num_global_tokens, num_local_experts]
         num_out_tokens: the number of output tokens. If None, it's set to the number of input tokens.
         drop_and_pad: whether or not the token dispatcher uses token-drop and pads the number
                       of tokens to the expert capacity. If set to true, routing_map has a fixed
                       number of non-zeros in each column.
-        tokens_per_expert: tensor of shape [num_experts] containing actual token counts per expert.
+        tokens_per_expert: tensor of shape [num_local_experts] containing actual token counts per expert.
         align_size: the alignment size for the input tensor for fp8 or fp4.
     
     Returns:
@@ -124,13 +124,13 @@ def permute(
             (optional) pad_offsets
             (optional) padded_tokens_per_expert
     """
-    num_tokens, hidden_size = tokens.shape # [S*B*EP, H] -> [num_tokens, hidden_size]
-    num_experts = routing_map.size()[1] # [num_local_experts]
+    num_tokens, hidden_size = tokens.shape # [S*B*EP, H] -> [num_global_tokens, hidden_size]
+    num_local_experts = routing_map.size()[1] # [num_local_experts]
     permuted_probs = None
     if drop_and_pad and num_out_tokens is not None:
-        capacity = num_out_tokens // num_experts
+        capacity = num_out_tokens // num_local_experts
         assert not routing_map.requires_grad
-        # mask [num_tokens, num_local_experts] -> [num_local_experts, num_tokens]
+        # mask [num_global_tokens, num_local_experts] -> [num_local_experts, num_global_tokens]
         routing_map = routing_map.to(dtype=torch.int8).T.contiguous()
         # use argsort to put indices of all non-zeros in the beginning of list
         # and keep the first capacity number of indices.
@@ -141,22 +141,22 @@ def permute(
         sorted_indices = sorted_indices.view(-1) # [num_local_experts*capacity]
 
         if probs is not None:
-            # [num_tokens, num_local_experts] -> num_local_experts * num_tokens
+            # [num_global_tokens, num_local_experts] -> num_local_experts * num_global_tokens
             probs_T_1D = probs.T.contiguous().view(-1)
             # get 1D indices of the probs selected by routing_map
             # indices_dim0 is expert range for shape of [num_local_experts]
-            indices_dim0 = torch.arange(num_experts, device=routing_map.device).unsqueeze(-1)
-            indices_dim1 = sorted_indices.view(num_experts, capacity)
+            indices_dim0 = torch.arange(num_local_experts, device=routing_map.device).unsqueeze(-1)
+            indices_dim1 = sorted_indices.view(num_local_experts, capacity)
             # expert_id * num_tokens + token_id
             indices_1D = (indices_dim0 * num_tokens + indices_dim1).view(-1)
             # get probs from indices
             permuted_probs = probs_T_1D.index_select(0, indices_1D)
     else:
-        # mask [num_tokens, num_local_experts] -> [num_local_experts, num_tokens]
+        # mask [num_global_tokens, num_local_experts] -> [num_local_experts, num_global_tokens]
         routing_map = routing_map.bool().T.contiguous()
         # Create a dense expert-to-token mapping from the sparse token-to-expert mapping
         token_indices = (
-            torch.arange(num_tokens, device=routing_map.device).unsqueeze(0).expand(num_experts, -1)
+            torch.arange(num_tokens, device=routing_map.device).unsqueeze(0).expand(num_local_experts, -1)
         ) # [num_local_experts, num_tokens]
         sorted_indices = token_indices.masked_select(routing_map)
         
@@ -210,17 +210,17 @@ def unpermute(
     if probs is not None:
         assert routing_map is not None, "Mask must be provided to permute the probs."
         if drop_and_pad:
-            num_experts = routing_map.size()[1]
+            num_local_experts = routing_map.size()[1]
             num_permuted_tokens = sorted_indices.size()[0]
-            capacity = num_permuted_tokens // num_experts
+            capacity = num_permuted_tokens // num_local_experts
             num_unpermuted_tokens = probs.size()[0]
 
             # [num_unpermuted_tokens, num_experts] -> num_experts * num_unpermuted_tokens
             probs_T_1D = probs.T.contiguous().view(-1)
             # get 1D indices of the probs selected by routing_map
             # indices_dim0 is expert range
-            indices_dim0 = torch.arange(num_experts, device=routing_map.device).unsqueeze(-1)
-            indices_dim1 = sorted_indices.view(num_experts, capacity)
+            indices_dim0 = torch.arange(num_local_experts, device=routing_map.device).unsqueeze(-1)
+            indices_dim1 = sorted_indices.view(num_local_experts, capacity)
             indices_1D = (indices_dim0 * num_unpermuted_tokens + indices_dim1).view(-1)
 
             # get probs from indices

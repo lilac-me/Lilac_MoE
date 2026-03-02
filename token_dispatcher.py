@@ -28,6 +28,8 @@ from transformer_config import TransformerConfig
     EP: expert model parallel size
     num_local_tokens: S/TP*B
     num_global_tokens: num_local_tokens*TP*EP = S/TP*B*TP*EP = S*B*EP
+    num_local_experts: the number of experts on each EP rank, which is equal to num_experts/EP.
+    num_experts: the total number of experts across all EP ranks.
 """
 
 class MoETokenDispatcher:
@@ -59,7 +61,7 @@ class MoETokenDispatcher:
 
     @abstractmethod
     def dispatch_preprocess(
-        self, tokens: Tensor, routing_map: Tensor, probs: Tensor
+        self, hidden_states: Tensor, routing_map: Tensor, probs: Tensor
     ) -> tuple[Tensor, Tensor]:
         """
         Prepare tokens for dispatch without inter-device communication.
@@ -73,12 +75,12 @@ class MoETokenDispatcher:
             same stream runs sequentially and may get exposed.
 
         Args:
-        tokens (torch.Tensor): Input tokens.
-        routing_map (torch.Tensor): Token to expert mapping tensor.
-        probs (torch.Tensor): The routing probability tensor, [num_tokens, num_experts].
+            hidden_states (torch.Tensor): Input hidden states.
+            routing_map (torch.Tensor): Token to expert mapping tensor.
+            probs (torch.Tensor): The routing probability tensor, [num_tokens, num_experts].
 
         Returns:
-            A tuple of preprocessed tokens and probabilities.
+            A tuple of preprocessed hidden states and probabilities.
         """
         raise NotImplementedError("dispatch_preprocess function not implemented")
     
@@ -256,7 +258,7 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
                 self.routing_map = gather_from_sequence_parallel_region(
                     self.routing_map, self.tp_ep_group
                 )
-            ## local_probs calculation.
+            # local_probs calculation.
             # max_probs: [S/TP*B, num_experts] -> global_probs: [S*B*EP, num_experts]
             probs = gather_from_sequence_parallel_region(probs, self.tp_ep_group)
             # [S/TP*B, H] -> [(S/TP)*B*(TP*EP), H] -> [S*B*EP, H]
@@ -290,7 +292,7 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
 
         permuted_local_hidden_states, _, self.reversed_local_input_permutation_mapping, _, _ = permute(
             hidden_states, # [S*B*EP, H]
-            self.local_map, # [S*B*EP, num_local_experts] -> [num_local_tokens, num_local_experts]
+            self.local_map, # [S*B*EP, num_local_experts] -> [num_global_tokens, num_local_experts]
             num_out_tokens=tokens_per_expert.sum().item(),
         )
         # permuted_local_hidden_states: [num_local_tokens, H]
@@ -315,7 +317,7 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
         """
         unpermuted_local_hidden_states = unpermute(
             hidden_states, # [num_local_tokens, H]
-            self.reversed_local_input_permutation_mapping,
+            self.reversed_local_input_permutation_mapping, # [num_local_tokens]
             restore_shape=self.hidden_shape_before_permute,
             routing_map=self.local_map,
         )
