@@ -318,7 +318,7 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
         unpermuted_local_hidden_states = unpermute(
             hidden_states, # [num_local_tokens, H]
             self.reversed_local_input_permutation_mapping, # [num_local_tokens]
-            restore_shape=self.hidden_shape_before_permute,
+            restore_shape=self.hidden_shape_before_permute, # [S*B*EP, H]
             routing_map=self.local_map,
         )
         # unpermuted_local_hidden_states: [S*B*EP, H]

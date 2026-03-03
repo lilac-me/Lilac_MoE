@@ -124,7 +124,7 @@ def permute(
             (optional) pad_offsets
             (optional) padded_tokens_per_expert
     """
-    num_tokens, hidden_size = tokens.shape # [S*B*EP, H] -> [num_global_tokens, hidden_size]
+    num_global_tokens, hidden_size = tokens.shape # [S*B*EP, H] -> [num_global_tokens, hidden_size]
     num_local_experts = routing_map.size()[1] # [num_local_experts]
     permuted_probs = None
     if drop_and_pad and num_out_tokens is not None:
@@ -148,7 +148,7 @@ def permute(
             indices_dim0 = torch.arange(num_local_experts, device=routing_map.device).unsqueeze(-1)
             indices_dim1 = sorted_indices.view(num_local_experts, capacity)
             # expert_id * num_tokens + token_id
-            indices_1D = (indices_dim0 * num_tokens + indices_dim1).view(-1)
+            indices_1D = (indices_dim0 * num_global_tokens + indices_dim1).view(-1)
             # get probs from indices
             permuted_probs = probs_T_1D.index_select(0, indices_1D)
     else:
@@ -156,15 +156,15 @@ def permute(
         routing_map = routing_map.bool().T.contiguous()
         # Create a dense expert-to-token mapping from the sparse token-to-expert mapping
         token_indices = (
-            torch.arange(num_tokens, device=routing_map.device).unsqueeze(0).expand(num_local_experts, -1)
-        ) # [num_local_experts, num_tokens]
-        sorted_indices = token_indices.masked_select(routing_map)
-        
+            torch.arange(num_global_tokens, device=routing_map.device).unsqueeze(0).expand(num_local_experts, -1)
+        ) # [num_local_experts, num_global_tokens]
+        sorted_indices = token_indices.masked_select(routing_map) # 1D tensor of token indices sorted by expert which selected by routing_map
+
         if probs is not None:
             permuted_probs = probs.T.contiguous().masked_select(routing_map)
     
     # use the mapping to permute the tokens
-    permuted_input = tokens.index_select(0, sorted_indices)
+    permuted_input = tokens.index_select(0, sorted_indices) # [num_selected_tokens, hidden_size]
 
     return permuted_input, permuted_probs, sorted_indices, None, tokens_per_expert
 
@@ -204,7 +204,7 @@ def unpermute(
     Returns:
         the tokens restored to their original order.
     """
-    _, hidden_size = restore_shape
+    _, hidden_size = restore_shape # [S*B*EP, H] -> hidden_size
     input_dtype = permuted_tokens.dtype
 
     if probs is not None:
@@ -215,12 +215,13 @@ def unpermute(
             capacity = num_permuted_tokens // num_local_experts
             num_unpermuted_tokens = probs.size()[0]
 
-            # [num_unpermuted_tokens, num_experts] -> num_experts * num_unpermuted_tokens
+            # [num_unpermuted_tokens, num_local_experts] -> num_local_experts * num_unpermuted_tokens
             probs_T_1D = probs.T.contiguous().view(-1)
             # get 1D indices of the probs selected by routing_map
             # indices_dim0 is expert range
             indices_dim0 = torch.arange(num_local_experts, device=routing_map.device).unsqueeze(-1)
             indices_dim1 = sorted_indices.view(num_local_experts, capacity)
+            # expert_id * num_unpermuted_tokens + token_id
             indices_1D = (indices_dim0 * num_unpermuted_tokens + indices_dim1).view(-1)
 
             # get probs from indices
@@ -233,6 +234,7 @@ def unpermute(
         permuted_tokens = permuted_tokens * permuted_probs.unsqueeze(-1)
     
     # Create an output tensor filled with zeros.
+    # [S*B*EP, H] -> [num_global_tokens, hidden_size]
     output_tokens = torch.zeros(
         restore_shape, dtype=permuted_tokens.dtype, device=permuted_tokens.device
     )
@@ -247,6 +249,7 @@ def unpermute(
         output_tokens.index_add_(0, sorted_indices, permuted_tokens)
     else:
         # scatter add the permuted_tokens back to the original positions
+        # [num_selected_tokens, hidden_size] -> [num_global_tokens, hidden_size]
         output_tokens.scatter_add_(
             0, sorted_indices.unsqueeze(1).expand(-1, hidden_size), permuted_tokens
         )
@@ -254,7 +257,7 @@ def unpermute(
 
 
 def sort_chunks_by_idxs(
-    input: Tensor,
+    input_: Tensor,
     split_sizes: Tensor,
     sorted_idxs: Tensor,
     probs: Optional[Tensor] = None,
@@ -263,7 +266,7 @@ def sort_chunks_by_idxs(
     Split and sort the input tensor based on the split_sizes and sorted_indices.
 
     Args:
-        input: the input tensor.
+        input_: the input tensor.
         split_sizes: the split sizes.
         sorted_idxs: the sorted indices.
         probs: the probs tensor. Default to None.
@@ -273,8 +276,8 @@ def sort_chunks_by_idxs(
     Returns:
         the sorted output tensor and permuted probs.
     """
-    input = torch.split(input, split_sizes.tolist(), dim=0)
-    output = torch.cat([input[i] for i in sorted_idxs.tolist()], dim=0)
+    input_ = torch.split(input_, split_sizes.tolist(), dim=0)
+    output = torch.cat([input_[i] for i in sorted_idxs.tolist()], dim=0)
     if probs is not None:
         probs = torch.split(probs, split_sizes.tolist(), dim=0)
         permuted_probs = torch.cat([probs[i] for i in sorted_idxs.tolist()], dim=0)
