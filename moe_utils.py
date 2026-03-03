@@ -246,10 +246,12 @@ def unpermute(
         )
         # index_add is deterministic when torch.use_deterministic_algorithms(True) is set 
         # and cuda graph compatible unlike scatter_add
+        # formula: output[index[i]][j] += src[i][j] where index is 1D
         output_tokens.index_add_(0, sorted_indices, permuted_tokens)
     else:
         # scatter add the permuted_tokens back to the original positions
         # [num_selected_tokens, hidden_size] -> [num_global_tokens, hidden_size]
+        # formula: output[index[i][j]][j] += src[i][j] where index is 2D with src
         output_tokens.scatter_add_(
             0, sorted_indices.unsqueeze(1).expand(-1, hidden_size), permuted_tokens
         )
