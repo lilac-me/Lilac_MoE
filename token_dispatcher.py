@@ -321,7 +321,7 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
             restore_shape=self.hidden_shape_before_permute, # [S*B*EP, H]
             routing_map=self.local_map,
         )
-        # unpermuted_local_hidden_states: [S*B*EP, H]
+        # unpermuted_local_hidden_states: [num_selected_tokens, H]
         return unpermuted_local_hidden_states
     
     def token_combine(self, hidden_states: Tensor) -> Tensor:
@@ -345,7 +345,7 @@ class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
     
     def combine_postprocess(self, hidden_states: Tensor) -> Tensor:
         """
-        Restoring the original tensor shape..
+        Restoring the original tensor shape.
 
         Args:
             hidden_states (Tensor): 2D [num_local_tokens, H].
