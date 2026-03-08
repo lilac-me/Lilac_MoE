@@ -192,3 +192,45 @@ def generate_masked_orthogonal_rank_groups(
     def inner_product(a: List[int], b: List[int]) -> int:
         return sum([x * y for x, y in zip(a, b)])
     
+    def decompose(index, shape, stride=None):
+        """
+        This function solve the math problem below:
+            There is an equation:
+                index = sum(idx[i] * stride[i])
+            And given the value of index, stride.
+            Return the idx.
+        This function will be used to get the pp/dp/pp_rank
+        from group_index and rank_in_group.
+        """
+        if stride is None:
+            stride = prefix_product(shape)
+        idx = [(index // d) % s for s, d in zip(shape, stride)]
+        # stride is a prefix_product result. And the value of stride[-1] is not used.
+        assert (
+            sum([x * y for x, y in zip(idx, stride[:-1])]) == index
+        )
+        return idx
+    
+    masked_shape = [s for s, m in zip(parallel_size, mask) if m]
+    unmasked_shape = [s for s, m in zip(parallel_size, mask) if not m]
+
+    global_stride = prefix_product(parallel_size)
+    masked_stride = [d for d, m in zip(global_stride, mask) if m]
+    unmasked_stride = [d for d, m in zip(global_stride, mask) if not m]
+
+    group_size = prefix_product(masked_shape)[-1]
+    num_of_group = world_size // group_size
+
+    ranks = []
+    for group_index in range(num_of_group):
+        # get indices from unmasked for group_index.
+        decomposed_group_idx = decompose(group_index, unmasked_shape)
+        rank = []
+        for rank_in_group in range(group_size):
+            # get indices from masked for rank_in_group.
+            decomposed_rank_idx = decompose(rank_in_group, masked_shape)
+            # combine the indices from masked and unmasked to get the global rank.
+            global_rank = inner_product(decomposed_rank_idx, masked_stride) + inner_product(decomposed_group_idx, masked_stride)
+            rank.append(global_rank)
+        ranks.append(rank)
+    return ranks
