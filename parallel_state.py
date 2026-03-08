@@ -234,3 +234,85 @@ def generate_masked_orthogonal_rank_groups(
             rank.append(global_rank)
         ranks.append(rank)
     return ranks
+
+
+class RankGenerator(object):
+    """
+    A class for generating rank groups for different modes of parallelism.
+    """
+    def __init__(
+        self, tp: int, cp: int, ep: int, dp: int, pp: int, order: str, rank_offset: int = 0
+    )-> None:
+        # tp-cp-dp-pp for Dense/attn while etp-ep-edp-pp for MoE/expert layers.
+        assert (
+            cp == 1 or ep == 1
+        ), "Both EP and CP > 1 is not allowed in one rank generator."
+        
+        self.tp = tp
+        self.cp = cp
+        self.ep = ep
+        self.dp = dp
+        self.pp = pp
+        self.rank_offset = rank_offset
+        self.world_size = tp * cp * ep * dp * pp
+
+        self.name_to_size = {
+            'tp': tp,
+            'cp': cp,
+            'ep': ep,
+            'dp': dp,
+            'pp': pp,
+        }
+        self.order = order
+        order = order.lower()
+
+        for name in self.name_to_size.keys():
+            if name not in order and self.name_to_size[name] != 1:
+                raise RuntimeError(
+                    f"The size of ({name}) is ({self.name_to_size[name]}), but we have not"
+                    "specified the order ({self.order})."
+                )
+            elif name not in order:
+                order = order + '-' + name
+        
+        self.order = order
+        self.order_size = []
+        
+        for token in order.split('-'):
+            self.order_size.append(self.name_to_size[token])
+
+    def get_mask(self, order: str, token: str):
+        """
+        Create a mask for the specified tokens based on the given order.
+
+        Args:
+            order: The order of parallelism (e.g., "tp-dp-pp").
+            token: The specific parallelism types to include in the mask,
+            separated by hyphens(e.g., "tp-pp").
+        """
+        ordered_token = order.split('-')
+        token_list = token.split('-')
+        mask = [False] * len(ordered_token)
+        for t in token_list:
+            mask[ordered_token.index(t)] = True
+        return mask
+    
+    def get_ranks(self, token: str):
+        """
+        Get rank group by input token.
+
+        Args:
+            token (str):
+                Specify the ranks type that want to get. If we want
+                to obtain multiple types, we can use a hyphen '-' to
+                separate them. For example, if we want to obtain the TP_DP group,
+                the token should be 'tp-dp'.
+        """
+        mask = self.get_mask(self.order, token)
+        ranks = generate_masked_orthogonal_rank_groups(self.world_size, self.order_size, mask)
+        if self.rank_offset > 0:
+            for rank_group in ranks:
+                for i in range(len(rank_group)):
+                    rank_group[i] += self.rank_offset
+        return ranks
+    
