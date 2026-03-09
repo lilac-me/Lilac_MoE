@@ -230,7 +230,7 @@ def generate_masked_orthogonal_rank_groups(
             # get indices from masked for rank_in_group.
             decomposed_rank_idx = decompose(rank_in_group, masked_shape)
             # combine the indices from masked and unmasked to get the global rank.
-            global_rank = inner_product(decomposed_rank_idx, masked_stride) + inner_product(decomposed_group_idx, masked_stride)
+            global_rank = inner_product(decomposed_rank_idx, masked_stride) + inner_product(decomposed_group_idx, unmasked_stride)
             rank.append(global_rank)
         ranks.append(rank)
     return ranks
@@ -315,4 +315,108 @@ class RankGenerator(object):
                 for i in range(len(rank_group)):
                     rank_group[i] += self.rank_offset
         return ranks
+    
+
+def initialize_model_parallel(
+    tensor_model_parallel_size: int = 1,
+    pipeline_model_parallel_size: int = 1,
+    context_parallel_size: int = 1,
+    expert_model_parallel_size: int = 1,
+    expert_tensor_parallel_size: int = 1,
+    order: str="tp-cp-ep-dp-pp",
+    ranks_offset: int = 0,
+):
+    """
+    Initialize parallel groups for different modes of parallelism.
+
+    Args:
+        tensor_model_parallel_size (int, default=1):
+            The number of devices to split individual tensors across.
+
+        pipeline_model_parallel_size (int, default=1):
+            The number of tensor parallel device groups to split the 
+            Transformer layers across.
+
+        context_parallel_size (int, default=1):
+            The number of tensor parallel device groups to split the network input 
+            sequence length across. Compute attention module requires tokens of full
+            sequence length, so devices in a context paralle group need to communicate 
+            with each other to exchange information of other seuqence chunks.
+
+            Context parallelism partitions sequence length, so it has no impact on weights,
+            which means weights are duplicated among devices in a context paralle group. Hence,
+            weight gradients all-reduce is required in backward.
+
+        expert_model_parallel_size (int, default=1):
+            The number of Mixture of Experts parallel devices in each expert parallel group.
+
+        expert_tensor_parallel_size (int, default=tp_size):
+            The number of devices to split individual tensors of expert.
+
+        order (str, default="tp-dp-pp"):
+            The rank initialization order fo parallelism.
+
+        ranks_offset: the global rank offset for creating process groups, default is 0.
+
+    Returns:
+        A dictionary containing all the created process groups.
+    """
+
+    assert torch.distributed.is_initialized(), "torch.distributed is not initialized."
+
+    world_size = torch.distributed.get_world_size()
+    model_size = tensor_model_parallel_size * pipeline_model_parallel_size * context_parallel_size
+
+    if world_size % model_size != 0:
+        raise ValueError(
+            f"World size {world_size} is not divisible by model size {model_size}."
+        )
+    
+    data_parallel_size: int = world_size // model_size
+    
+    rank = torch.distributed.get_rank()
+
+    # build dense/attn rank generator.
+    decoder_rank_generator = RankGenerator(
+        tp=tensor_model_parallel_size,
+        cp=context_parallel_size,
+        ep=1,
+        dp=data_parallel_size,
+        pp=pipeline_model_parallel_size,
+        order=order,
+        rank_offset=ranks_offset,
+    )
+
+    # build expert rank generator.
+    if expert_tensor_parallel_size is None:
+        expert_tensor_parallel_size = tensor_model_parallel_size
+    expert_tensor_model_parallel_size = (
+        expert_tensor_parallel_size * expert_model_parallel_size * pipeline_model_parallel_size
+    )
+
+    if world_size % expert_tensor_model_parallel_size != 0:
+        raise ValueError(
+            f"World size {world_size} is not divisible by expert tensor model parallel size {expert_tensor_model_parallel_size}."
+        )
+    
+    expert_data_parallel_size = world_size // expert_tensor_model_parallel_size
+
+    expert_decoder_rank_generator = RankGenerator(
+        tp=expert_tensor_parallel_size,
+        cp=1,
+        ep=expert_model_parallel_size,
+        dp=expert_data_parallel_size,
+        pp=pipeline_model_parallel_size,
+        order=order,
+        rank_offset=ranks_offset,
+    )
+
+    assert (
+        order.endswith("pp")
+        or pipeline_model_parallel_size == 1
+        or expert_data_parallel_size == data_parallel_size
+    ), "When not using pp-last rank ordering, the data parallel size of the attention and moe layers must be the same"
+
+    assert decoder_rank_generator.get_ranks("pp") == expert_decoder_rank_generator.get_ranks("pp"), \
+        "The pp groups are expected to be the same for Non-MoE and MoE parts."
     
