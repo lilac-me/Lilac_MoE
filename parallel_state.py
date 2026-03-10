@@ -585,3 +585,67 @@ def initialize_model_parallel(
         if rank in ranks:
             _EXPERT_DATA_PARALLEL_GROUP = group
             _EXPERT_DATA_PARALLEL_GROUP_GLOO = group_gloo
+
+
+def get_tensor_model_parallel_group(check_initialized=True):
+    """
+    Get the tensor model parallel group the caller rank belongs to.
+    """
+    if check_initialized:
+        assert (
+            _TENSOR_MODEL_PARALLEL_GROUP is not None
+        ), "tensor model parallel is not initialized"
+    return _TENSOR_MODEL_PARALLEL_GROUP
+
+
+def get_pipeline_model_parallel_group(check_initialized=True):
+    """
+    Get the pipeline model parallel group the caller rank belongs to.
+    """
+    if check_initialized:
+        assert (
+            _PIPELINE_MODEL_PARALLEL_GROUP is not None
+        ), "pipeline model parallel group is not initialized"
+    return _PIPELINE_MODEL_PARALLEL_GROUP
+
+
+def get_model_parallel_group(check_initialized=True):
+    """
+    Get the model parallel group the caller rank belongs to.
+    """
+    if check_initialized:
+        assert (
+            _MODEL_PARALLEL_GROUP is not None
+        ), "model parallel group is not initialized"
+    return _MODEL_PARALLEL_GROUP
+
+def get_expert_model_parallel_group(check_initialized=True):
+    """
+    Get the expert model parallel group the caller rank belongs to.
+    """
+    if check_initialized:
+        assert (
+            _EXPERT_MODEL_PARALLEL_GROUP is not None
+        ), "expert model parallel is not initialized"
+    return _EXPERT_MODEL_PARALLEL_GROUP
+
+
+def get_context_parallel_group(check_initialized=True):
+    """
+    Get the context parallel group the caller rank belongs to.
+    """
+    if check_initialized:
+        assert (
+            _CONTEXT_PARALLEL_GROUP is not None
+        ), "context parallel group is not initialized"
+    return _CONTEXT_PARALLEL_GROUP
+
+def get_expert_tensor_parallel_group(check_initialized=True):
+    """
+    Get the expert tensor model parallel group the caller rank belongs to.
+    """
+    if check_initialized:
+        assert (
+            _EXPERT_TENSOR_PARALLEL_GROUP is not None
+        ), "expert tensor parallel is not initialized"
+    return _EXPERT_TENSOR_PARALLEL_GROUP
