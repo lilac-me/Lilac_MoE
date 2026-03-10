@@ -1,6 +1,7 @@
 import logging
 from typing import Optional, List, Callable
 from math import log2
+from datetime import timedelta
 import einops
 
 import torch
@@ -59,6 +60,24 @@ _DATA_PARALLEL_GLOBAL_RANKS = None
 # Used for updating the timeout for all process groups
 # None represents the default process group
 _global_process_group_list = None
+
+
+def get_nccl_options(pg_name: str, nccl_comm_cfgs: dict):
+    """
+    Set the NCCL process group options.
+
+    Args:
+        pg_name: process group name.
+        ncc_comm_cfgs: nccl communicator configurations.
+    """
+    
+    if pg_name in nccl_comm_cfgs:
+        nccl_options = torch.distributed.ProcessGroupNCCL.Options(
+            is_high_priority_stream=nccl_comm_cfgs[pg_name].get("is_high_priority_stream", False)
+        )
+        return nccl_options
+    else:
+        return None
 
 
 def create_group(
@@ -325,6 +344,8 @@ def initialize_model_parallel(
     expert_tensor_parallel_size: int = 1,
     order: str="tp-cp-ep-dp-pp",
     ranks_offset: int = 0,
+    create_gloo_process_groups: bool = True,
+    distributed_timeout_minutes: int = 30,
 ):
     """
     Initialize parallel groups for different modes of parallelism.
@@ -356,11 +377,19 @@ def initialize_model_parallel(
         order (str, default="tp-dp-pp"):
             The rank initialization order fo parallelism.
 
-        ranks_offset: the global rank offset for creating process groups, default is 0.
+        ranks_offset (int, default=0):
+            The global rank offset for creating process groups, default is 0.
+
+        create_gloo_process_groups (bool, default=True):
+            Create gloo process groups if set to true. If set to false, gloo process groups
+            are not created.
 
     Returns:
         A dictionary containing all the created process groups.
     """
+
+    nccl_comm_cfgs = {}
+    timeout = timedelta(distributed_timeout_minutes)
 
     assert torch.distributed.is_initialized(), "torch.distributed is not initialized."
 
