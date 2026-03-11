@@ -4,6 +4,8 @@ from functools import partial
 
 import torch
 
+import parallel_state
+
 @dataclass
 class ProgressGroupCollection:
     """
@@ -113,9 +115,9 @@ class ProgressGroupCollection:
             'pp': partial(parallel_state.get_pipeline_model_parallel_group, check_initialized=False),
             'mp': partial(parallel_state.get_model_parallel_group, check_initialized=False),
             'cp': partial(parallel_state.get_context_parallel_group, check_initialized=False),
-            'ep': partial(parallel_state.get_expert_parallel_group, check_initialized=False),
+            'ep': partial(parallel_state.get_expert_model_parallel_group, check_initialized=False),
             'expt_tp': partial(parallel_state.get_expert_tensor_parallel_group, check_initialized=False),
-            'tp_ep': partial(parallel_state.get_tensor_expert_parallel_group, check_initialized=False),
+            'tp_ep': partial(parallel_state.get_expert_tensor_and_model_parallel_group, check_initialized=False),
             'dp': partial(parallel_state.get_data_parallel_group, check_initialized=False),
             'expt_dp': partial(parallel_state.get_expert_data_parallel_group, check_initialized=False)
         }

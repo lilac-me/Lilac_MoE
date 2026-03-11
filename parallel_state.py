@@ -21,6 +21,8 @@ _CONTEXT_PARALLEL_GROUP = None
 _EXPERT_MODEL_PARALLEL_GROUP = None
 # Expert tensor parallel group that the current rank belongs to.
 _EXPERT_TENSOR_PARALLEL_GROUP = None
+# Expert tensor and model combined parallel group that the current rank belongs to.
+_EXPERT_TENSOR_AND_MODEL_PARALLEL_GROUP = None
 # Data parallel group that the current rank belongs to.
 _DATA_PARALLEL_GROUP = None
 _DATA_PARALLEL_GROUP_GLOO = None
@@ -471,14 +473,14 @@ def initialize_model_parallel(
                 ranks=ranks,
                 timeout=timeout,
                 pg_options=get_nccl_options("dp", nccl_comm_cfgs),
-                group_desc=f"DATA_PARALLEL_GROUP",
+                group_desc="DATA_PARALLEL_GROUP",
             )
         else:
             group = create_group(
                 ranks=ranks,
                 timeout=timeout,
                 backend=backend,
-                group_desc=f"DATA_PARALLEL_GROUP"
+                group_desc="DATA_PARALLEL_GROUP"
             )
 
         group_gloo = None
@@ -487,7 +489,7 @@ def initialize_model_parallel(
                 ranks=ranks,
                 timeout=timeout,
                 backend="gloo",
-                group_desc=f"DATA_PARALLEL_GROUP_GLOO",
+                group_desc="DATA_PARALLEL_GROUP_GLOO",
             )
 
         if rank in ranks:
@@ -504,14 +506,14 @@ def initialize_model_parallel(
                 ranks=ranks,
                 timeout=timeout,
                 pg_options=get_nccl_options("cp", nccl_comm_cfgs),
-                group_desc=f"CONTEXT_PARALLEL_GROUP",
+                group_desc="CONTEXT_PARALLEL_GROUP",
             )
         else:
             group = create_group(
                 ranks=ranks,
                 timeout=timeout,
                 backend=backend,
-                group_desc=f"CONTEXT_PARALLEL_GROUP"
+                group_desc="CONTEXT_PARALLEL_GROUP"
             )
 
         if rank in ranks:
@@ -528,14 +530,14 @@ def initialize_model_parallel(
                 ranks=ranks,
                 timeout=timeout,
                 pg_options=get_nccl_options("tp-pp", nccl_comm_cfgs),
-                group_desc=f"MODEL_PARALLEL_GROUP",
+                group_desc="MODEL_PARALLEL_GROUP",
             )
         else:
             group = create_group(
                 ranks=ranks,
                 timeout=timeout,
                 backend=backend,
-                group_desc=f"MODEL_PARALLEL_GROUP"
+                group_desc="MODEL_PARALLEL_GROUP"
             )
 
         if rank in ranks:
@@ -552,14 +554,14 @@ def initialize_model_parallel(
                 ranks=ranks,
                 timeout=timeout,
                 pg_options=get_nccl_options("tp", nccl_comm_cfgs),
-                group_desc=f"TENSOR_MODEL_PARALLEL_GROUP",
+                group_desc="TENSOR_MODEL_PARALLEL_GROUP",
             )
         else:
             group = create_group(
                 ranks=ranks,
                 timeout=timeout,
                 backend=backend,
-                group_desc=f"TENSOR_MODEL_PARALLEL_GROUP"
+                group_desc="TENSOR_MODEL_PARALLEL_GROUP"
             )
 
         if rank in ranks:
@@ -576,14 +578,14 @@ def initialize_model_parallel(
                 ranks=ranks,
                 timeout=timeout,
                 pg_options=get_nccl_options("pp", nccl_comm_cfgs),
-                group_desc=f"PIPELINE_MODEL_PARALLEL_GROUP",
+                group_desc="PIPELINE_MODEL_PARALLEL_GROUP",
             )
         else:
             group = create_group(
                 ranks=ranks,
                 timeout=timeout,
                 backend=backend,
-                group_desc=f"PIPELINE_MODEL_PARALLEL_GROUP"
+                group_desc="PIPELINE_MODEL_PARALLEL_GROUP"
             )
 
         if rank in ranks:
@@ -600,14 +602,14 @@ def initialize_model_parallel(
                 ranks=ranks,
                 timeout=timeout,
                 pg_options=get_nccl_options("ep", nccl_comm_cfgs),
-                group_desc=f"EXPERT_MODEL_PARALLEL_GROUP",
+                group_desc="EXPERT_MODEL_PARALLEL_GROUP",
             )
         else:
             group = create_group(
                 ranks=ranks,
                 timeout=timeout,
                 backend=backend,
-                group_desc=f"EXPERT_MODEL_PARALLEL_GROUP"
+                group_desc="EXPERT_MODEL_PARALLEL_GROUP"
             )
 
         if rank in ranks:
@@ -630,7 +632,7 @@ def initialize_model_parallel(
                 ranks=ranks,
                 timeout=timeout,
                 backend=backend,
-                group_desc=f"EXPERT_TENSOR_PARALLEL_GROUP"
+                group_desc="EXPERT_TENSOR_PARALLEL_GROUP"
             )
 
         if rank in ranks:
@@ -654,17 +656,50 @@ def initialize_model_parallel(
                 ranks=ranks,
                 timeout=timeout,
                 backend=backend,
-                group_desc=f"EXPERT_DATA_PARALLEL_GROUP"
+                group_desc="EXPERT_DATA_PARALLEL_GROUP"
             )
         group_gloo = None
         if backend == "nccl" and create_gloo_process_groups:
             group_gloo = create_group(
                 ranks, backend="gloo", group_desc="EXPERT_DATA_PARALLEL_GROUP_GLOO"
             )
-            
+
         if rank in ranks:
             _EXPERT_DATA_PARALLEL_GROUP = group
             _EXPERT_DATA_PARALLEL_GROUP_GLOO = group_gloo
+
+    # build tensor + expert parallel groups.
+    global _EXPERT_TENSOR_AND_MODEL_PARALLEL_GROUP
+    assert _EXPERT_TENSOR_AND_MODEL_PARALLEL_GROUP is None, "Expert tensor and  group is already initialized."
+    for ranks in expert_decoder_rank_generator.get_ranks("tp-ep"):
+        if backend == "nccl":
+            group = create_group(
+                ranks=ranks,
+                timeout=timeout,
+                pg_options=get_nccl_options("tp_ep", nccl_comm_cfgs),
+                group_desc="EXPERT_TENSOR_AND_MODEL_PARALLEL_GROUP",
+            )
+        else:
+            group = create_group(
+                ranks=ranks,
+                timeout=timeout,
+                backend=backend,
+                group_desc=f"EXPERT_TENSOR_AND_MODEL_PARALLEL_GROUP"
+            )
+
+        if rank in ranks:
+            _EXPERT_TENSOR_AND_MODEL_PARALLEL_GROUP = group
+
+
+def get_data_parallel_group(check_initialized=True):
+    """
+    Get data parallel group the caller rank belongs to.
+    """
+    if check_initialized:
+        assert (
+            _DATA_PARALLEL_GROUP is not None
+        ), "data parallel group is not initialized"
+    return _DATA_PARALLEL_GROUP
 
 
 def get_tensor_model_parallel_group(check_initialized=True):
@@ -706,8 +741,19 @@ def get_expert_model_parallel_group(check_initialized=True):
     if check_initialized:
         assert (
             _EXPERT_MODEL_PARALLEL_GROUP is not None
-        ), "expert model parallel is not initialized"
+        ), "expert model parallel group is not initialized"
     return _EXPERT_MODEL_PARALLEL_GROUP
+
+
+def get_expert_data_parallel_group(check_initialized=True):
+    """
+    Get the expert data parallel group the caller rank belongs to.
+    """
+    if check_initialized:
+        assert (
+            _EXPERT_DATA_PARALLEL_GROUP is not None
+        ), "expert data parallel group is not initialized."
+    return _EXPERT_DATA_PARALLEL_GROUP
 
 
 def get_context_parallel_group(check_initialized=True):
@@ -729,3 +775,14 @@ def get_expert_tensor_parallel_group(check_initialized=True):
             _EXPERT_TENSOR_PARALLEL_GROUP is not None
         ), "expert tensor parallel is not initialized"
     return _EXPERT_TENSOR_PARALLEL_GROUP
+
+
+def get_expert_tensor_and_model_parallel_group(check_initialized=True):
+    """
+    Get the expert-tensor and expert-model group the caller rank belongs to.
+    """
+    if check_initialized:
+        assert (
+            _EXPERT_TENSOR_AND_MODEL_PARALLEL_GROUP is not None
+        ), "Expert tensor and model parallel group is not initialized"
+    return _EXPERT_TENSOR_AND_MODEL_PARALLEL_GROUP
