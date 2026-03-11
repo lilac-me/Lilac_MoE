@@ -533,8 +533,8 @@ def initialize_model_parallel(
             group_desc=f"PIPELINE_PARALLEL_GROUP",
         )
         if rank in ranks:
-            _PIPELINE_PARALLEL_GROUP = group
-            _PIPELINE_PARALLEL_GLOBAL_RANKS = ranks
+            _PIPELINE_MODEL_PARALLEL_GROUP = group
+            _PIPELINE_MODEL_PARALLEL_GLOBAL_RANKS = ranks
 
     # build expert model parallel groups.
     global _EXPERT_MODEL_PARALLEL_GROUP
