@@ -7,7 +7,7 @@ import torch
 import parallel_state
 
 @dataclass
-class ProgressGroupCollection:
+class ProcessGroupCollection:
     """
     Unified process group collection for transformer model parallelism, gradient accumulation
     and finalization.
