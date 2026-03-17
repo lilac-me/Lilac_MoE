@@ -50,7 +50,6 @@ class MoETokenDispatcher:
             pg_collection (ProcessGroupCollection, optional): Process groups for MoE operations.
         """
         self.config = config
-        self.shared_experts = Optional[SharedExpertMLP] = None
 
         self.ep_group = pg_collection.ep
         # use pg_collection.expt_tp_group as tensor model parallel group in this module.
@@ -183,13 +182,6 @@ class MoETokenDispatcher:
             The final output tensor.
         """
         raise NotImplementedError("combine_postprocess function not implemented")
-    
-    def set_shared_expert(self, shared_experts: SharedExpertMLP) -> None:
-        """
-        Set the shared expert MLP for this token dispatcher.
-        """
-        assert self.config.moe_shared_expert_overlap
-        self.shared_experts = shared_experts
     
 
 class MoEAllgatherTokenDispatcher(MoETokenDispatcher):
@@ -447,8 +439,6 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         if MoEAlltoAllTokenDispatcher.d2h_stream is None:
             MoEAlltoAllTokenDispatcher.d2h_stream = torch.cuda.Stream()
 
-        self.shared_experts = None
-
     def preprocess(self, routing_map: Tensor) -> Tensor:
         """
         Preprocess the token routing map for All-to-All communication and token permutation.
@@ -596,9 +586,6 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             self.routing_map = pad_routing_map(self.routing_map, pad_multiple)
         self.tokens_per_expert = self.preprocess(self.routing_map)
 
-        if self.shared_experts is not None:
-            self.shared_experts.pre_foward_comm(hidden_states.view(self.hidden_shape))
-
         # Permutation 1: input to AlltoAll input
         self.tokens_per_expert = self._maybe_d2h_and_synchronize(
             "before_permutation_1", self.tokens_per_expert
@@ -659,8 +646,6 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         Returns:
             A tuple of hidden states, number of tokens per expert, and probabilities after postprocessing.
         """
-        if self.shared_experts is not None:
-            self.shared_experts.linear_fc1_forward_and_act(global_input_tokens)
 
         if self.tp_size >1:
             if self.output_splits_tp is None:
@@ -783,8 +768,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         Finalize token reconstruction with unpermutation and reshaping.
 
         This method unpermutes the tokens back to their original order,
-        reshapes the tensor to its original shape, and adds the shared expert 
-        output if enabled.
+        reshapes the tensor to its original shape.
 
         Args:
             permutated_local_input_tokens: permuted hidden states from token combine.
@@ -792,10 +776,6 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         Returns:
             the final MoE layer output reshaped to its original dimensions.
         """
-        if self.shared_experts is not None:
-            self.shared_experts.linear_fc2_forward(permutated_local_input_tokens)
-            self.shared_experts.post_forward_comm()
-
         # Unpermutation 1: AlltoAll output to output
         output = permute(
             permutated_local_input_tokens,
@@ -807,12 +787,6 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
 
         # Reshape the output tensor
         output = output.view(self.hidden_shape)
-
-        # Add shared expert output
-        if self.shared_experts is not None:
-            shared_expert_output = self.shared_experts.get_output()
-            output += shared_expert_output
-        return output
     
     def _maybe_update_cuda_sync_point(self, point: str):
         """
