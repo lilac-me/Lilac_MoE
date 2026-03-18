@@ -786,3 +786,7 @@ def get_expert_tensor_and_model_parallel_group(check_initialized=True):
             _EXPERT_TENSOR_AND_MODEL_PARALLEL_GROUP is not None
         ), "Expert tensor and model parallel group is not initialized"
     return _EXPERT_TENSOR_AND_MODEL_PARALLEL_GROUP
+
+
+def is_initialized():
+    return _DATA_PARALLEL_GROUP is not None

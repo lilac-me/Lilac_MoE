@@ -400,7 +400,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         self.output_splits = None
         # [tp_size]. Represents the number of tokens received by the current rank from other TP ranks.
         self.output_splits_tp = None
-        self.permute_idx_device = torch.device("cuda") if config.moe_permute_fusion else "cpu"
+        self.permute_idx_device = "cpu"
         # [num_experts * tp_size] = [num_local_experts * ep_size * tp_size].
         input_chunk_idxs = torch.arange(
             self.num_experts * self.tp_size, device=self.permute_idx_device
@@ -545,9 +545,9 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             self.num_global_tokens_per_local_expert = num_global_tokens_per_local_expert.view(
                 -1, self.num_local_experts
             )
-            if not config.moe_permute_fusion:
-                # A synchronization is needed before permutation 2 to get the 'num_global_tokens_per_local_expert' CPU values.
-                self._maybe_update_cuda_sync_point("before_permutation_2")
+            
+            # A synchronization is needed before permutation 2 to get the 'num_global_tokens_per_local_expert' CPU values.
+            self._maybe_update_cuda_sync_point("before_permutation_2")
         
         assert (
             self.cuda_sync_point_priority[self.cuda_d2h_point]
@@ -827,7 +827,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
                     self.num_out_tokens = maybe_move_tensor_to_cpu(
                         self.num_out_tokens, record_stream=on_side_stream
                     )
-                    if self.num_local_experts > 1 and not self.config.moe_permute_fusion:
+                    if self.num_local_experts > 1:
                         self.num_global_tokens_per_local_expert = maybe_move_tensor_to_cpu(
                             self.num_global_tokens_per_local_expert, record_stream=on_side_stream
                         )

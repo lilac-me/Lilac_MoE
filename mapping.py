@@ -2,6 +2,7 @@ from typing import Any
 import torch
 
 from moe_utils import get_global_memory_buffer
+from utils import get_tensor_model_parallel_group_if_none
 
 
 device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
