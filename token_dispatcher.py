@@ -437,7 +437,11 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         }
         self.cuda_d2h_point = "before_permutation_1"
         if MoEAlltoAllTokenDispatcher.d2h_stream is None:
-            MoEAlltoAllTokenDispatcher.d2h_stream = torch.cuda.Stream()
+            if torch.cuda.is_available():
+                MoEAlltoAllTokenDispatcher.d2h_stream = torch.cuda.Stream()
+            else:
+                from contextlib import nullcontext
+                MoEAlltoAllTokenDispatcher.d2h_stream = nullcontext()
 
     def preprocess(self, routing_map: Tensor) -> Tensor:
         """
@@ -806,6 +810,10 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         Move all possible device tensors to host and make a synchronization at the expected point.
         """
         if not self.drop_and_pad:
+            if not torch.cuda.is_available():
+                if tokens_per_expert is not None:
+                    return tokens_per_expert.cpu()
+                return tokens_per_expert
             if point == self.cuda_sync_point:
                 # Move all possible device tensors to host at self.cuda_d2h_point.
                 on_side_stream = torch.cuda.Stream() != self.d2h_stream
