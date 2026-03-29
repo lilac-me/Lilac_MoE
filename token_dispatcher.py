@@ -423,7 +423,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         self.capacity = None
 
         # A cuda stream synchronized is needed in during token permutation in some cases,
-        # because there are several non-blocking d2h data transfers called at 'self.cuda_d2h_point'.
+        # because there are several non-blocking d2h data transfers called at 'self.d2h_point'.
         # The synchronization happens at 'self.cuda_sync_point', which is decided based on the
         # MoE and parallel settings. Valid points are 'before_permutation_1', 'before_ep_alltoall',
         # 'before_permutation_2', 'before_finish' and 'no_sync'.
@@ -435,7 +435,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             "before_finish": 3,
             "no_sync": 4,
         }
-        self.cuda_d2h_point = "before_permutation_1"
+        self.d2h_point = "before_permutation_1"
         if MoEAlltoAllTokenDispatcher.d2h_stream is None:
             if torch.cuda.is_available():
                 MoEAlltoAllTokenDispatcher.d2h_stream = torch.cuda.Stream()
@@ -451,7 +451,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         It also initilizes necessary data structures for All-to-All communication, such as input
         and output splits, and the mapping between global tokens and local experts. This method should
         not call any d2h data coping due to performance consideration. The necessary d2h copies are
-        made on the 'self.cuda_d2h_stream' at 'self.cuda_d2h_point'.
+        made on the 'self.cuda_d2h_stream' at 'self.d2h_point'.
 
         Args:
             routing_map (Tensor): 2D [S/TP*B, num_experts]. The token to expert mapping tensor.
@@ -554,9 +554,9 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             self._maybe_update_cuda_sync_point("before_permutation_2")
         
         assert (
-            self.cuda_sync_point_priority[self.cuda_d2h_point]
+            self.cuda_sync_point_priority[self.d2h_point]
             <= self.cuda_sync_point_priority[self.cuda_sync_point]
-        ), "cuda_sync_point must be after cuda_d2h_point."
+        ), "cuda_sync_point must be after d2h_point."
         return num_local_tokens_per_expert
     
     def dispatch_preprocess(
@@ -628,11 +628,13 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         self.tokens_per_expert = self._maybe_d2h_and_synchronize(
             "before_ep_alltoall", self.tokens_per_expert
         )
+        input_splits = self.input_splits.tolist()
+        output_splits = self.output_splits.tolist()
         global_input_tokens = all_to_all(
-            self.ep_group, permuted_local_input_tokens, self.input_splits, self.output_splits
+            self.ep_group, permuted_local_input_tokens, output_splits, input_splits
         )
         global_probs = all_to_all(
-            self.ep_group, permuted_probs, self.input_splits, self.output_splits
+            self.ep_group, permuted_probs, output_splits, input_splits
         )
         return global_input_tokens, global_probs
 
@@ -762,8 +764,10 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         """
         # Perform expert parallel AlltAll communication
         # hidden_states: [SEQL, H] -> [H, SEQL/TP]
+        input_splits = self.input_splits.tolist()
+        output_splits = self.output_splits.tolist()
         permutated_local_input_tokens = all_to_all(
-            self.ep_group, hidden_states, self.input_splits, self.output_splits
+            self.ep_group, hidden_states, input_splits, output_splits
         )
         return permutated_local_input_tokens
     
@@ -781,7 +785,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             the final MoE layer output reshaped to its original dimensions.
         """
         # Unpermutation 1: AlltoAll output to output
-        output = permute(
+        output = unpermute(
             permutated_local_input_tokens,
             self.reversed_local_input_permutation_mapping,
             restore_shape=self.hidden_shape_before_permute,
@@ -791,6 +795,8 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
 
         # Reshape the output tensor
         output = output.view(self.hidden_shape)
+
+        return output
     
     def _maybe_update_cuda_sync_point(self, point: str):
         """
@@ -814,8 +820,8 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
                 if tokens_per_expert is not None:
                     return tokens_per_expert.cpu()
                 return tokens_per_expert
-            if point == self.cuda_sync_point:
-                # Move all possible device tensors to host at self.cuda_d2h_point.
+            if point == self.d2h_point:
+                # Move all possible device tensors to host at self.d2h_point.
                 on_side_stream = torch.cuda.Stream() != self.d2h_stream
                 if on_side_stream:
                     self.d2h_stream.wait_stream(torch.cuda.current_stream())
@@ -824,13 +830,13 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
                         tokens_per_expert, record_stream=on_side_stream
                     )
                     self.input_splits = maybe_move_tensor_to_cpu(
-                        self.input_splits, record_stream=on_side_stream
+                        self.input_splits, as_numpy=True, record_stream=on_side_stream
                     )
                     self.output_splits = maybe_move_tensor_to_cpu(
-                        self.output_splits, record_stream=on_side_stream
+                        self.output_splits, as_numpy=True, record_stream=on_side_stream
                     )
                     self.output_splits_tp = maybe_move_tensor_to_cpu(
-                        self.output_splits_tp, record_stream=on_side_stream
+                        self.output_splits_tp, as_numpy=True, record_stream=on_side_stream
                     )
                     self.num_out_tokens = maybe_move_tensor_to_cpu(
                         self.num_out_tokens, record_stream=on_side_stream

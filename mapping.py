@@ -113,7 +113,7 @@ def reduce_scatter_to_sequence_parallel_region(
 
 def all_to_all(group, input_, output_split_sizes=None, input_split_sizes=None):
     assert group is not None, "group should not be None"
-    _AllToAll.apply(group, input_, output_split_sizes, input_split_sizes)
+    return _AllToAll.apply(group, input_, output_split_sizes, input_split_sizes)
 
 
 class _GatherFromSequenceParallelRegion(torch.autograd.Function):
@@ -217,7 +217,7 @@ class _AllToAll(torch.autograd.Function):
             output = torch.empty_like(input_)
         else:
             # Unequal split (all2all-v)
-            output = torch.empty(
+            output = input_.new_empty(
                 size=[sum(output_split_sizes)] + list(input_.size()[1:]),
                 dtype=input_.dtype,
                 device=input_.device,
