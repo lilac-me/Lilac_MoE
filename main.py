@@ -53,7 +53,6 @@ def run(args):
     config = TransformerConfig(
         num_moe_experts=num_experts,
         moe_router_topk=2,
-        hidden_size=16,
         add_bias_linear=False,
     )
 
